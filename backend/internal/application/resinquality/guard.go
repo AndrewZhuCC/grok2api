@@ -2,28 +2,35 @@ package resinquality
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math/rand"
+	"strconv"
 	"time"
+
+	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
+	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 )
 
 // Guard runs passive/active cycles and executes Resin lease actions.
 type Guard struct {
-	cfg   Config
-	log   *slog.Logger
-	resin *ResinClient
-	store *stateStore
+	cfg        Config
+	log        *slog.Logger
+	resin      *ResinClient
+	store      *stateStore
+	clientKeys *clientkeyapp.Service
 }
 
-// NewGuard constructs a guard. Returns nil-safe no-op if !cfg.CanRun().
-func NewGuard(cfg Config, logger *slog.Logger) *Guard {
+// NewGuard constructs a guard. clientKeys may be nil (then only env ProbeAPIKey works).
+func NewGuard(cfg Config, logger *slog.Logger, clientKeys *clientkeyapp.Service) *Guard {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	g := &Guard{
-		cfg:   cfg,
-		log:   logger.With("component", "resin_quality_guard"),
-		store: newStateStore(cfg.StateFile),
+		cfg:        cfg,
+		log:        logger.With("component", "resin_quality_guard"),
+		store:      newStateStore(cfg.StateFile),
+		clientKeys: clientKeys,
 	}
 	if cfg.CanRun() {
 		g.resin = NewResinClient(cfg.ResinBaseURL, cfg.ResinAdminToken, cfg.RequestTimeout)
@@ -36,12 +43,22 @@ func (g *Guard) Enabled() bool {
 	return g != nil && g.cfg.CanRun()
 }
 
+// ProbeKeyOption is a safe client-key row for UI select (no secret).
+type ProbeKeyOption struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Prefix string `json:"prefix"`
+}
+
 // Status is the admin UI payload.
 type Status struct {
-	Available bool      `json:"available"`
-	Enabled   bool      `json:"enabled"`
-	Config    PublicCfg `json:"config"`
-	State     State     `json:"state"`
+	Available          bool             `json:"available"`
+	Enabled            bool             `json:"enabled"`
+	Config             PublicCfg        `json:"config"`
+	State              State            `json:"state"`
+	ProbeKeys          []ProbeKeyOption `json:"probeKeys,omitempty"`
+	SelectedProbeKeyID string           `json:"selectedProbeKeyId,omitempty"`
+	EffectiveProbeKey  string           `json:"effectiveProbeKeyId,omitempty"`
 }
 
 // PublicCfg is safe config for UI (no tokens).
@@ -59,6 +76,8 @@ type PublicCfg struct {
 	PlatformID        string  `json:"platformId"`
 	CanProbe          bool    `json:"canProbe"`
 	HasProxyURL       bool    `json:"hasProxyUrl"`
+	ProbeModel        string  `json:"probeModel"`
+	AutoSelectKey     bool    `json:"autoSelectKey"`
 }
 
 func (g *Guard) publicCfg() PublicCfg {
@@ -74,23 +93,136 @@ func (g *Guard) publicCfg() PublicCfg {
 		PassivePollSec:    int(g.cfg.PassivePoll.Seconds()),
 		FailClosed:        g.cfg.FailClosed,
 		PlatformID:        g.cfg.PlatformID,
-		CanProbe:          g.cfg.CanProbe(),
+		CanProbe:          g.canProbe(),
 		HasProxyURL:       g.cfg.ResinProxyURL != "",
+		ProbeModel:        g.cfg.ProbeModel,
+		AutoSelectKey:     g.clientKeys != nil && g.cfg.ProbeAPIKey == "",
 	}
 }
 
-// GetStatus returns UI status.
-func (g *Guard) GetStatus() Status {
+func (g *Guard) canProbe() bool {
+	if g == nil || g.cfg.ProbeBaseURL == "" {
+		return false
+	}
+	if g.cfg.ProbeAPIKey != "" {
+		return true
+	}
+	return g.clientKeys != nil
+}
+
+// GetStatus returns UI status including usable client keys for probe select.
+func (g *Guard) GetStatus(ctx context.Context) Status {
 	if g == nil {
 		return Status{Available: false}
 	}
+	st := g.store.snapshot()
+	keys := g.listProbeKeyOptions(ctx)
+	selected := st.SelectedProbeKeyID
+	if selected == 0 {
+		selected = g.cfg.ProbeKeyID
+	}
+	effective := g.effectiveProbeKeyID(keys, selected)
 	return Status{
-		Available: g.Enabled(),
-		Enabled:   g.cfg.Enabled,
-		Config:    g.publicCfg(),
-		State:     g.store.snapshot(),
+		Available:          g.Enabled(),
+		Enabled:            g.cfg.Enabled,
+		Config:             g.publicCfg(),
+		State:              st,
+		ProbeKeys:          keys,
+		SelectedProbeKeyID: formatKeyID(selected),
+		EffectiveProbeKey:  formatKeyID(effective),
 	}
 }
+
+func formatKeyID(id uint64) string {
+	if id == 0 {
+		return ""
+	}
+	return strconv.FormatUint(id, 10)
+}
+
+func (g *Guard) listProbeKeyOptions(ctx context.Context) []ProbeKeyOption {
+	if g.clientKeys == nil {
+		return nil
+	}
+	items, _, err := g.clientKeys.List(ctx, 1, 200, "", clientkeyapp.ListFilter{Status: "active"})
+	if err != nil {
+		g.log.Warn("list_probe_keys_failed", "error", err)
+		return nil
+	}
+	now := time.Now().UTC()
+	out := make([]ProbeKeyOption, 0, len(items))
+	for _, key := range items {
+		if !key.IsAvailable(now) {
+			continue
+		}
+		out = append(out, ProbeKeyOption{
+			ID:     strconv.FormatUint(key.ID, 10),
+			Name:   key.Name,
+			Prefix: key.Prefix,
+		})
+	}
+	return out
+}
+
+func (g *Guard) effectiveProbeKeyID(keys []ProbeKeyOption, selected uint64) uint64 {
+	if selected != 0 {
+		for _, k := range keys {
+			if k.ID == strconv.FormatUint(selected, 10) {
+				return selected
+			}
+		}
+	}
+	if g.cfg.ProbeKeyID != 0 {
+		for _, k := range keys {
+			if k.ID == strconv.FormatUint(g.cfg.ProbeKeyID, 10) {
+				return g.cfg.ProbeKeyID
+			}
+		}
+	}
+	if len(keys) > 0 {
+		id, _ := strconv.ParseUint(keys[0].ID, 10, 64)
+		return id
+	}
+	return 0
+}
+
+// SetSelectedProbeKey stores UI selection (0 = auto).
+func (g *Guard) SetSelectedProbeKey(id uint64) {
+	g.store.update(func(st *State) {
+		st.SelectedProbeKeyID = id
+	})
+}
+
+// resolveProbeAPIKey returns bearer secret for model probe.
+func (g *Guard) resolveProbeAPIKey(ctx context.Context) (secret string, keyID uint64, err error) {
+	if g.cfg.ProbeAPIKey != "" {
+		return g.cfg.ProbeAPIKey, 0, nil
+	}
+	if g.clientKeys == nil {
+		return "", 0, errProbeNotConfigured
+	}
+	keys := g.listProbeKeyOptions(ctx)
+	st := g.store.snapshot()
+	selected := st.SelectedProbeKeyID
+	if selected == 0 {
+		selected = g.cfg.ProbeKeyID
+	}
+	id := g.effectiveProbeKeyID(keys, selected)
+	if id == 0 {
+		return "", 0, fmt.Errorf("%w: no active client key", errProbeNotConfigured)
+	}
+	secret, err = g.clientKeys.RevealSecret(ctx, id)
+	if err != nil {
+		return "", 0, err
+	}
+	return secret, id, nil
+}
+
+func usableKey(key clientkeydomain.Key, now time.Time) bool {
+	return key.IsAvailable(now)
+}
+
+var _ = usableKey // keep for tests / clarity
 
 // Run is the background loop (startBackground compatible).
 func (g *Guard) Run(ctx context.Context) error {
@@ -165,12 +297,12 @@ func (g *Guard) runActiveCycle(ctx context.Context) {
 		return
 	}
 
-	// 1) exit sample
+	// 1) exit sample — connectivity only; never quarantine solely on sample failure
+	// (avoids mass lease clears from TLS/DNS blips).
 	if g.cfg.ResinProxyURL != "" {
 		ip, err := SampleExitIP(ctx, g.cfg.ResinProxyURL, 15*time.Second)
 		if err != nil {
 			g.log.Warn("active_exit_sample_failed", "error", err)
-			g.observe(ClassError, "exit_sample_failed", 0, "active")
 		} else {
 			g.log.Info("active_exit_sample", "exit_ip", ip)
 			g.store.update(func(st *State) {
@@ -179,25 +311,31 @@ func (g *Guard) runActiveCycle(ctx context.Context) {
 		}
 	}
 
-	// 2) optional model probe
-	if g.cfg.CanProbe() {
-		result, err := RunModelProbe(ctx, g.cfg.ProbeBaseURL, g.cfg.ProbeAPIKey, g.cfg.ProbeModel, g.cfg.ProbeMaxTokens, 120*time.Second)
-		g.store.update(func(st *State) {
-			st.Pool.LastProbeAt = float64(time.Now().Unix())
-			st.bump("active", "total", 1)
-		})
+	// 2) optional model probe (auto client key like creative console)
+	if g.canProbe() {
+		secret, keyID, err := g.resolveProbeAPIKey(ctx)
 		if err != nil {
-			g.log.Warn("active_probe_failed", "error", err)
-			g.store.update(func(st *State) { st.bump("active", "error", 1) })
-			g.observe(ClassError, "active_probe_error", 0, "active")
+			g.log.Info("active_probe_skipped", "reason", err.Error())
 		} else {
-			class, reason := classifyProbe(g.cfg, result)
+			result, err := RunModelProbe(ctx, g.cfg.ProbeBaseURL, secret, g.cfg.ProbeModel, g.cfg.ProbeMaxTokens, 120*time.Second)
 			g.store.update(func(st *State) {
-				if class != ClassIgnored {
-					st.bump("active", class, 1)
-				}
+				st.Pool.LastProbeAt = float64(time.Now().Unix())
+				st.bump("active", "total", 1)
 			})
-			g.observe(class, reason, result.OutputTokensPerSecond, "active")
+			if err != nil {
+				g.log.Warn("active_probe_failed", "error", err, "key_id", keyID)
+				g.store.update(func(st *State) { st.bump("active", "error", 1) })
+				g.observe(ClassError, "active_probe_error", 0, "active")
+			} else {
+				class, reason := classifyProbe(g.cfg, result)
+				g.store.update(func(st *State) {
+					if class != ClassIgnored {
+						st.bump("active", class, 1)
+					}
+				})
+				g.log.Info("active_probe_done", "key_id", keyID, "class", class, "tps", result.OutputTokensPerSecond)
+				g.observe(class, reason, result.OutputTokensPerSecond, "active")
+			}
 		}
 	} else {
 		g.log.Info("active_probe_skipped", "reason", "probe not configured")
@@ -318,20 +456,30 @@ func (g *Guard) tryRecover(ctx context.Context) {
 	healthy := true
 	reason := "connectivity_only"
 	speed := 0.0
-	if g.cfg.CanProbe() {
-		result, err := RunModelProbe(ctx, g.cfg.ProbeBaseURL, g.cfg.ProbeAPIKey, g.cfg.ProbeModel, g.cfg.ProbeMaxTokens, 120*time.Second)
-		g.store.update(func(st *State) { st.bump("active", "total", 1) })
+	if g.canProbe() {
+		secret, _, err := g.resolveProbeAPIKey(ctx)
 		if err != nil {
-			healthy = false
-			reason = "recovery_probe_error"
-			g.store.update(func(st *State) { st.bump("active", "error", 1) })
+			healthy = sampleOK
+			if healthy {
+				reason = "connectivity_ok"
+			} else {
+				reason = "connectivity_failed"
+			}
 		} else {
-			class, r := classifyProbe(g.cfg, result)
-			speed = result.OutputTokensPerSecond
-			reason = r
-			healthy = class == ClassHealthy
-			if class != ClassIgnored {
-				g.store.update(func(st *State) { st.bump("active", class, 1) })
+			result, err := RunModelProbe(ctx, g.cfg.ProbeBaseURL, secret, g.cfg.ProbeModel, g.cfg.ProbeMaxTokens, 120*time.Second)
+			g.store.update(func(st *State) { st.bump("active", "total", 1) })
+			if err != nil {
+				healthy = false
+				reason = "recovery_probe_error"
+				g.store.update(func(st *State) { st.bump("active", "error", 1) })
+			} else {
+				class, r := classifyProbe(g.cfg, result)
+				speed = result.OutputTokensPerSecond
+				reason = r
+				healthy = class == ClassHealthy
+				if class != ClassIgnored {
+					g.store.update(func(st *State) { st.bump("active", class, 1) })
+				}
 			}
 		}
 	} else {
@@ -344,7 +492,7 @@ func (g *Guard) tryRecover(ctx context.Context) {
 	}
 
 	// connectivity-only: refuse restore onto still-suspect IP
-	if healthy && !g.cfg.CanProbe() && sampleIP != "" {
+	if healthy && !g.canProbe() && sampleIP != "" {
 		for _, s := range snap.Pool.SuspectExitIPs {
 			if s == sampleIP {
 				healthy = false
@@ -442,15 +590,24 @@ func (g *Guard) ManualReshuffle(ctx context.Context) (ActionResult, error) {
 	return g.executePoolAction(ctx, "manual", nil)
 }
 
-// ManualProbe runs one active cycle piece for admin UI.
+// ManualProbe runs one active model probe for admin UI (uses selected/auto client key).
 func (g *Guard) ManualProbe(ctx context.Context) (ProbeResult, error) {
 	if !g.Enabled() {
 		return ProbeResult{}, errDisabled
 	}
-	if !g.cfg.CanProbe() {
+	if !g.canProbe() {
 		return ProbeResult{OK: false, Error: "probe not configured"}, errProbeNotConfigured
 	}
-	return RunModelProbe(ctx, g.cfg.ProbeBaseURL, g.cfg.ProbeAPIKey, g.cfg.ProbeModel, g.cfg.ProbeMaxTokens, 120*time.Second)
+	secret, keyID, err := g.resolveProbeAPIKey(ctx)
+	if err != nil {
+		return ProbeResult{OK: false, Error: err.Error()}, err
+	}
+	result, err := RunModelProbe(ctx, g.cfg.ProbeBaseURL, secret, g.cfg.ProbeModel, g.cfg.ProbeMaxTokens, 120*time.Second)
+	if err != nil {
+		return result, err
+	}
+	g.log.Info("manual_probe_done", "key_id", keyID, "tps", result.OutputTokensPerSecond, "matched", result.ExpectedMatched)
+	return result, nil
 }
 
 var (

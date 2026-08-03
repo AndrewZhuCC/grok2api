@@ -33,9 +33,11 @@ type Config struct {
 	RequestTimeout    time.Duration
 	StateFile         string
 
-	// Optional: use local gateway base for model probe (empty = skip active model probe).
+	// Optional: use local gateway base for model probe.
+	// Prefer in-process ClientKey List/Reveal (like creative console) over env secret.
 	ProbeBaseURL   string
-	ProbeAPIKey    string
+	ProbeAPIKey    string // optional legacy override; leave empty to auto-pick client keys
+	ProbeKeyID     uint64 // optional preferred client key id (0 = auto first usable)
 	ProbeModel     string
 	ProbeMaxTokens int
 }
@@ -66,6 +68,7 @@ func LoadConfigFromEnv() Config {
 		StateFile:         envStr("RESIN_QUALITY_GUARD_STATE_FILE", "/app/data/resin-quality-guard-state.json"),
 		ProbeBaseURL:      strings.TrimRight(envStr("RESIN_QUALITY_GUARD_PROBE_BASE_URL", ""), "/"),
 		ProbeAPIKey:       envStr("RESIN_QUALITY_GUARD_PROBE_API_KEY", ""),
+		ProbeKeyID:        uint64(envInt("RESIN_QUALITY_GUARD_PROBE_KEY_ID", 0)),
 		ProbeModel:        envStr("RESIN_QUALITY_GUARD_PROBE_MODEL", "grok-4.5"),
 		ProbeMaxTokens:    envInt("RESIN_QUALITY_GUARD_PROBE_MAX_TOKENS", 256),
 	}
@@ -86,8 +89,12 @@ func (c Config) CanRun() bool {
 	return c.Enabled && c.ResinBaseURL != "" && c.ResinAdminToken != ""
 }
 
-func (c Config) CanProbe() bool {
-	return c.ProbeBaseURL != "" && c.ProbeAPIKey != ""
+// CanProbeWithKeys is true when base URL is set and either env secret or key store can supply a key.
+func (c Config) CanProbeWithKeys(hasKeyStore bool) bool {
+	if c.ProbeBaseURL == "" {
+		return false
+	}
+	return c.ProbeAPIKey != "" || hasKeyStore
 }
 
 func envStr(name, def string) string {

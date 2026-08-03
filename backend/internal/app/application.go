@@ -369,7 +369,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	if resinQualityCfg.ProbeBaseURL == "" && resinQualityCfg.Enabled {
 		resinQualityCfg.ProbeBaseURL = "http://127.0.0.1" + normalizeListenForLoopback(cfg.Server.Listen)
 	}
-	resinQualityGuard := resinqualityapp.NewGuard(resinQualityCfg, logger)
+	// Auto-pick client keys via List/RevealSecret (same idea as creative console); no manual PROBE_API_KEY required.
+	resinQualityGuard := resinqualityapp.NewGuard(resinQualityCfg, logger, clientKeyService)
 
 	startup := newStartupState(len(windows))
 	readiness := func(readyCtx context.Context) httpserver.ReadinessSnapshot {

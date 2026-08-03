@@ -44,14 +44,15 @@ type Event struct {
 
 // State is persisted JSON.
 type State struct {
-	Version           int       `json:"version"`
-	Pool              PoolState `json:"pool"`
-	Statistics        Stats     `json:"statistics"`
-	Events            []Event   `json:"events"`
-	LastPassivePollAt float64   `json:"lastPassivePollAt"`
-	LastActiveCycleAt float64   `json:"lastActiveCycleAt"`
-	StartedAt         float64   `json:"startedAt"`
-	UpdatedAt         float64   `json:"updatedAt"`
+	Version            int       `json:"version"`
+	Pool               PoolState `json:"pool"`
+	Statistics         Stats     `json:"statistics"`
+	Events             []Event   `json:"events"`
+	LastPassivePollAt  float64   `json:"lastPassivePollAt"`
+	LastActiveCycleAt  float64   `json:"lastActiveCycleAt"`
+	StartedAt          float64   `json:"startedAt"`
+	UpdatedAt          float64   `json:"updatedAt"`
+	SelectedProbeKeyID uint64    `json:"selectedProbeKeyId,omitempty"` // UI-chosen client key; 0 = auto
 }
 
 func defaultState() State {

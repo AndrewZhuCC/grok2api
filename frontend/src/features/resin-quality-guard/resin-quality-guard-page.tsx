@@ -1,16 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { RefreshCw, ShieldCheck, Shuffle, Zap } from "lucide-react";
+import { KeyRound, RefreshCw, ShieldCheck, Shuffle, Zap } from "lucide-react";
 import type { ReactNode } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import {
   getResinQualityStatus,
   postResinQualityProbe,
   postResinQualityReshuffle,
+  setResinQualityProbeKey,
 } from "@/features/resin-quality-guard/resin-quality-guard-api";
 import { ErrorState } from "@/shared/components/data-state";
 import { PageHeader } from "@/shared/components/page-header";
@@ -27,10 +30,30 @@ function formatTs(ts?: number): string {
 export function ResinQualityGuardPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const [localKeyId, setLocalKeyId] = useState<string | null>(null);
+
   const statusQuery = useQuery({
     queryKey: ["resin-quality-guard"],
     queryFn: getResinQualityStatus,
     refetchInterval: 5_000,
+  });
+
+  const probeKeys = statusQuery.data?.probeKeys ?? [];
+  const serverSelected = statusQuery.data?.selectedProbeKeyId ?? "";
+  const effectiveKeyId = statusQuery.data?.effectiveProbeKeyId ?? "";
+  const selectValue = useMemo(() => {
+    if (localKeyId !== null) return localKeyId || "auto";
+    return serverSelected || "auto";
+  }, [localKeyId, serverSelected]);
+
+  const keyMutation = useMutation({
+    mutationFn: (keyId: string) => setResinQualityProbeKey(keyId === "auto" ? "auto" : keyId),
+    onSuccess: async () => {
+      setLocalKeyId(null);
+      await queryClient.invalidateQueries({ queryKey: ["resin-quality-guard"] });
+      toast.success(t("resinQualityGuard.keySaved"));
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : t("resinQualityGuard.actionFailed")),
   });
 
   const reshuffleMutation = useMutation({
@@ -70,6 +93,10 @@ export function ResinQualityGuardPage() {
   const stats = status?.state?.statistics;
   const events = status?.state?.events ?? [];
   const cfg = status?.config;
+  // Auto mode needs at least one listed key; env-only mode uses canProbe without listing secrets.
+  const canProbe = Boolean(
+    status?.available && (probeKeys.length > 0 || (cfg?.canProbe && cfg?.autoSelectKey === false)),
+  );
 
   return (
     <div className="space-y-6">
@@ -82,7 +109,7 @@ export function ResinQualityGuardPage() {
               <RefreshCw className="size-4" />
               {t("common.refresh")}
             </Button>
-            <Button variant="outline" size="sm" disabled={!status?.available || probeMutation.isPending || !cfg?.canProbe} onClick={() => probeMutation.mutate()}>
+            <Button variant="outline" size="sm" disabled={!canProbe || probeMutation.isPending} onClick={() => probeMutation.mutate()}>
               <Zap className="size-4" />
               {t("resinQualityGuard.probe")}
             </Button>
@@ -98,6 +125,43 @@ export function ResinQualityGuardPage() {
         <div className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">{t("resinQualityGuard.disabledHint")}</div>
       ) : (
         <>
+          <aside className="flex shrink-0 flex-col gap-2 rounded-lg bg-secondary/45 px-4 py-2.5 text-xs leading-5 text-muted-foreground sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+            <div className="flex min-w-0 items-center gap-3">
+              <KeyRound className="size-4 shrink-0" />
+              <span>{t("resinQualityGuard.probeKeyHint")}</span>
+            </div>
+            <div className="flex min-w-[14rem] items-center gap-2">
+              <Select
+                value={selectValue}
+                onValueChange={(value) => {
+                  setLocalKeyId(value === "auto" ? "" : value);
+                  keyMutation.mutate(value === "auto" ? "auto" : value);
+                }}
+                disabled={keyMutation.isPending || probeKeys.length === 0}
+              >
+                <SelectTrigger className="h-8 w-full min-w-[12rem] bg-background text-foreground">
+                  <SelectValue placeholder={t("resinQualityGuard.selectKey")} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">{t("resinQualityGuard.autoKey")}</SelectItem>
+                  {probeKeys.map((key) => (
+                    <SelectItem key={key.id} value={key.id}>
+                      {key.name} ({key.prefix}…)
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </aside>
+          {probeKeys.length === 0 ? (
+            <p className="text-xs text-amber-600 dark:text-amber-400">{t("resinQualityGuard.noKeys")}</p>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              {t("resinQualityGuard.effectiveKey", { id: effectiveKeyId || "—" })}
+              {cfg?.probeModel ? ` · model ${cfg.probeModel}` : null}
+            </p>
+          )}
+
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             <InfoCard label={t("resinQualityGuard.status")} value={pool?.quarantineActive ? t("resinQualityGuard.quarantined") : t("resinQualityGuard.healthy")}>
               <Badge variant={pool?.quarantineActive ? "destructive" : "secondary"}>{pool?.lastClassification || "—"}</Badge>
@@ -185,7 +249,10 @@ function InfoCard({ label, value, children }: { label: string; value: string; ch
   return (
     <div className="rounded-xl border p-4">
       <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="mt-1 flex items-center gap-2 text-lg font-semibold">{value}{children}</div>
+      <div className="mt-1 flex items-center gap-2 text-lg font-semibold">
+        {value}
+        {children}
+      </div>
     </div>
   );
 }

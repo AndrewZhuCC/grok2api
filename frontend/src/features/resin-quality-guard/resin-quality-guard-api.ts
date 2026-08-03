@@ -15,6 +15,8 @@ export type ResinQualityPublicCfg = {
   platformId: string;
   canProbe: boolean;
   hasProxyUrl: boolean;
+  probeModel?: string;
+  autoSelectKey?: boolean;
 };
 
 export type ResinQualityPoolState = {
@@ -41,10 +43,19 @@ export type ResinQualityEvent = {
   cleared?: number;
 };
 
+export type ResinProbeKeyOption = {
+  id: string;
+  name: string;
+  prefix: string;
+};
+
 export type ResinQualityStatus = {
   available: boolean;
   enabled: boolean;
   config?: ResinQualityPublicCfg;
+  probeKeys?: ResinProbeKeyOption[];
+  selectedProbeKeyId?: string;
+  effectiveProbeKeyId?: string;
   state?: {
     version: number;
     pool: ResinQualityPoolState;
@@ -58,6 +69,7 @@ export type ResinQualityStatus = {
     lastActiveCycleAt: number;
     startedAt: number;
     updatedAt: number;
+    selectedProbeKeyId?: number;
   };
 };
 
@@ -77,6 +89,8 @@ const configShape = hasShape({
   platformId: isString,
   canProbe: isBoolean,
   hasProxyUrl: isBoolean,
+  probeModel: isOptional(isString),
+  autoSelectKey: isOptional(isBoolean),
 });
 
 const poolShape = hasShape({
@@ -103,6 +117,12 @@ const eventShape = hasShape({
   cleared: isOptional(isNumber),
 });
 
+const probeKeyShape = hasShape({
+  id: isString,
+  name: isString,
+  prefix: isString,
+});
+
 const stateShape = hasShape({
   version: isNumber,
   pool: poolShape,
@@ -116,12 +136,16 @@ const stateShape = hasShape({
   lastActiveCycleAt: isNumber,
   startedAt: isNumber,
   updatedAt: isNumber,
+  selectedProbeKeyId: isOptional(isNumber),
 });
 
 const statusDecoder = createObjectDecoder<ResinQualityStatus>("resin quality status", {
   available: isBoolean,
   enabled: isBoolean,
   config: isOptional(configShape),
+  probeKeys: isOptional(isArrayOf(probeKeyShape)),
+  selectedProbeKeyId: isOptional(isString),
+  effectiveProbeKeyId: isOptional(isString),
   state: isOptional(stateShape),
 });
 
@@ -129,6 +153,14 @@ const looseObjectDecoder = createValidatedDecoder<Record<string, unknown>>("loos
 
 export async function getResinQualityStatus(): Promise<ResinQualityStatus> {
   return apiRequest("/api/admin/v1/resin-quality-guard", { method: "GET" }, statusDecoder);
+}
+
+export async function setResinQualityProbeKey(keyId: string): Promise<ResinQualityStatus> {
+  return apiRequest(
+    "/api/admin/v1/resin-quality-guard/probe-key",
+    { method: "PUT", body: JSON.stringify({ keyId: keyId || "auto" }) },
+    statusDecoder,
+  );
 }
 
 export async function postResinQualityReshuffle(): Promise<Record<string, unknown>> {

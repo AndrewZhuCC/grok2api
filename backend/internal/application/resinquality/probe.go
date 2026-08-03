@@ -30,7 +30,8 @@ func SampleExitIP(ctx context.Context, proxyURL string, timeout time.Duration) (
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://1.1.1.1/cdn-cgi/trace", nil)
+	// Use a hostname (not bare 1.1.1.1) so TLS cert SANs validate.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://cloudflare.com/cdn-cgi/trace", nil)
 	if err != nil {
 		return "", err
 	}
