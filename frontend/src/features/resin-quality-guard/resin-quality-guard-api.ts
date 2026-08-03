@@ -1,5 +1,5 @@
 import { apiRequest } from "@/shared/api/client";
-import { createObjectDecoder, hasShape, isArrayOf, isBoolean, isNumber, isOptional, isRecordOf, isString } from "@/shared/api/decoder";
+import { createObjectDecoder, createValidatedDecoder, hasShape, isArrayOf, isBoolean, isNumber, isOptional, isRecordOf, isString } from "@/shared/api/decoder";
 
 export type ResinQualityPublicCfg = {
   mode: string;
@@ -63,84 +63,78 @@ export type ResinQualityStatus = {
 
 const numberRecord = isRecordOf(isNumber);
 
-const statusDecoder = createObjectDecoder<ResinQualityStatus>(
-  hasShape({
-    available: isBoolean,
-    enabled: isBoolean,
-    config: isOptional(
-      hasShape({
-        mode: isString,
-        actionMode: isString,
-        softTps: isNumber,
-        hardTps: isNumber,
-        consecutiveSoft: isNumber,
-        consecutiveErrors: isNumber,
-        quarantineSeconds: isNumber,
-        activeIntervalSeconds: isNumber,
-        passivePollSeconds: isNumber,
-        failClosed: isBoolean,
-        platformId: isString,
-        canProbe: isBoolean,
-        hasProxyUrl: isBoolean,
-      }),
-    ),
-    state: isOptional(
-      hasShape({
-        version: isNumber,
-        pool: hasShape({
-          softStrikes: isNumber,
-          errorStrikes: isNumber,
-          quarantinedUntil: isNumber,
-          quarantineActive: isBoolean,
-          lastReason: isString,
-          lastClassification: isString,
-          lastOutputTps: isNumber,
-          lastExitIp: isString,
-          suspectExitIps: isArrayOf(isString),
-          lastObservedAt: isNumber,
-          lastProbeAt: isNumber,
-        }),
-        statistics: hasShape({
-          passive: numberRecord,
-          active: numberRecord,
-          actions: numberRecord,
-        }),
-        events: isArrayOf(
-          hasShape({
-            ts: isNumber,
-            event: isString,
-            reason: isOptional(isString),
-            classification: isOptional(isString),
-            outputTps: isOptional(isNumber),
-            exitIp: isOptional(isString),
-            cleared: isOptional(isNumber),
-          }),
-        ),
-        lastPassivePollAt: isNumber,
-        lastActiveCycleAt: isNumber,
-        startedAt: isNumber,
-        updatedAt: isNumber,
-      }),
-    ),
+const configShape = hasShape({
+  mode: isString,
+  actionMode: isString,
+  softTps: isNumber,
+  hardTps: isNumber,
+  consecutiveSoft: isNumber,
+  consecutiveErrors: isNumber,
+  quarantineSeconds: isNumber,
+  activeIntervalSeconds: isNumber,
+  passivePollSeconds: isNumber,
+  failClosed: isBoolean,
+  platformId: isString,
+  canProbe: isBoolean,
+  hasProxyUrl: isBoolean,
+});
+
+const poolShape = hasShape({
+  softStrikes: isNumber,
+  errorStrikes: isNumber,
+  quarantinedUntil: isNumber,
+  quarantineActive: isBoolean,
+  lastReason: isString,
+  lastClassification: isString,
+  lastOutputTps: isNumber,
+  lastExitIp: isString,
+  suspectExitIps: isArrayOf(isString),
+  lastObservedAt: isNumber,
+  lastProbeAt: isNumber,
+});
+
+const eventShape = hasShape({
+  ts: isNumber,
+  event: isString,
+  reason: isOptional(isString),
+  classification: isOptional(isString),
+  outputTps: isOptional(isNumber),
+  exitIp: isOptional(isString),
+  cleared: isOptional(isNumber),
+});
+
+const stateShape = hasShape({
+  version: isNumber,
+  pool: poolShape,
+  statistics: hasShape({
+    passive: numberRecord,
+    active: numberRecord,
+    actions: numberRecord,
   }),
-);
+  events: isArrayOf(eventShape),
+  lastPassivePollAt: isNumber,
+  lastActiveCycleAt: isNumber,
+  startedAt: isNumber,
+  updatedAt: isNumber,
+});
+
+const statusDecoder = createObjectDecoder<ResinQualityStatus>("resin quality status", {
+  available: isBoolean,
+  enabled: isBoolean,
+  config: isOptional(configShape),
+  state: isOptional(stateShape),
+});
+
+const looseObjectDecoder = createValidatedDecoder<Record<string, unknown>>("loose object", (value) => typeof value === "object" && value !== null);
 
 export async function getResinQualityStatus(): Promise<ResinQualityStatus> {
   return apiRequest("/api/admin/v1/resin-quality-guard", { method: "GET" }, statusDecoder);
 }
 
 export async function postResinQualityReshuffle(): Promise<Record<string, unknown>> {
-  return apiRequest(
-    "/api/admin/v1/resin-quality-guard/reshuffle",
-    { method: "POST" },
-    (value) => (typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {}),
-  );
+  return apiRequest("/api/admin/v1/resin-quality-guard/reshuffle", { method: "POST" }, looseObjectDecoder);
 }
 
 export async function postResinQualityProbe(): Promise<Record<string, unknown>> {
-  return apiRequest(
-    "/api/admin/v1/resin-quality-guard/probe",
-    { method: "POST" },
-    (value) => (typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {}),
-  );
+  return apiRequest("/api/admin/v1/resin-quality-guard/probe", { method: "POST" }, looseObjectDecoder);
 }

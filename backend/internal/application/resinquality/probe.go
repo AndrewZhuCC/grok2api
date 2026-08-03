@@ -6,16 +6,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"os/exec"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 var ipRe = regexp.MustCompile(`(?m)^ip=([0-9a-fA-F:.]+)\s*$`)
 
-// SampleExitIP uses curl -x when available (socks5h friendly on VPS).
+// SampleExitIP fetches Cloudflare trace through an HTTP or SOCKS proxy (pure Go, no curl).
 func SampleExitIP(ctx context.Context, proxyURL string, timeout time.Duration) (exitIP string, err error) {
 	if strings.TrimSpace(proxyURL) == "" {
 		return "", fmt.Errorf("RESIN_PROXY_URL empty")
@@ -23,22 +26,73 @@ func SampleExitIP(ctx context.Context, proxyURL string, timeout time.Duration) (
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
-	curl, lookErr := exec.LookPath("curl")
-	if lookErr != nil {
-		return "", fmt.Errorf("curl not found for exit sampling")
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, curl, "-sS", "-x", proxyURL, "--max-time", fmt.Sprintf("%d", int(timeout.Seconds())), "https://1.1.1.1/cdn-cgi/trace")
-	out, err := cmd.Output()
+	client, err := httpClientViaProxy(proxyURL, timeout)
 	if err != nil {
-		return "", fmt.Errorf("curl exit sample: %w", err)
+		return "", err
 	}
-	m := ipRe.FindSubmatch(out)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://1.1.1.1/cdn-cgi/trace", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "grok2api-resin-quality-guard/1")
+	req.Header.Set("Accept", "text/plain")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if err != nil {
+		return "", err
+	}
+	m := ipRe.FindSubmatch(body)
 	if m == nil {
 		return "", fmt.Errorf("no ip= in trace")
 	}
 	return string(m[1]), nil
+}
+
+func httpClientViaProxy(proxyURL string, timeout time.Duration) (*http.Client, error) {
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse proxy url: %w", err)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	transport := &http.Transport{
+		Proxy:                 nil,
+		MaxIdleConns:          2,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: timeout,
+		ExpectContinueTimeout: time.Second,
+	}
+	switch scheme {
+	case "http", "https":
+		transport.Proxy = http.ProxyURL(parsed)
+	case "socks5", "socks5h":
+		var auth *proxy.Auth
+		if parsed.User != nil {
+			password, _ := parsed.User.Password()
+			auth = &proxy.Auth{User: parsed.User.Username(), Password: password}
+		}
+		// socks5h: resolve hostnames via proxy (Dial with host string, not pre-resolved IP).
+		base := &net.Dialer{Timeout: timeout}
+		var dialer proxy.Dialer
+		dialer, err = proxy.SOCKS5("tcp", parsed.Host, auth, base)
+		if err != nil {
+			return nil, err
+		}
+		if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
+			transport.DialContext = contextDialer.DialContext
+		} else {
+			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				return dialer.Dial(network, address)
+			}
+		}
+	default:
+		return nil, fmt.Errorf("unsupported proxy scheme %q", scheme)
+	}
+	return &http.Client{Timeout: timeout, Transport: transport}, nil
 }
 
 // RunModelProbe calls local/public OpenAI-compatible chat completions (non-stream).
@@ -109,7 +163,6 @@ func RunModelProbe(ctx context.Context, baseURL, apiKey, model string, maxTokens
 			tokens = int64(len(words))
 		}
 	}
-	// non-stream TTFT approximation
 	first := durationMS / 10
 	if first < 1 {
 		first = 1
