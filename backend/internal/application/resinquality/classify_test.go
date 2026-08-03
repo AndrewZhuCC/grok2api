@@ -39,3 +39,45 @@ func TestOutputTokensPerSecond(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestClassifyAuditHealthy(t *testing.T) {
+	cfg := Config{
+		SoftTPS:         500,
+		HardTPS:         1000,
+		MinGeneration:   time.Second,
+		MinOutputTokens: 32,
+	}
+	streaming := true
+	// 200 tokens over 2s generation after 200ms ttft => 100 tps healthy
+	class, reason, speed, tokens := classifyAudit(cfg, AuditSample{
+		Provider:     "grok_build",
+		Streaming:    &streaming,
+		Status:       "success",
+		StatusCode:   200,
+		OutputTokens: 200,
+		DurationMS:   2200,
+		FirstTokenMS: 200,
+	})
+	if class != ClassHealthy || reason != "ok" {
+		t.Fatalf("got %s/%s speed=%v tokens=%d", class, reason, speed, tokens)
+	}
+	if speed < 99 || speed > 101 {
+		t.Fatalf("unexpected speed %v", speed)
+	}
+}
+
+func TestClassifyAuditNonBuildIgnored(t *testing.T) {
+	cfg := Config{SoftTPS: 500, HardTPS: 1000, MinGeneration: time.Second, MinOutputTokens: 32}
+	streaming := true
+	class, reason, _, _ := classifyAudit(cfg, AuditSample{
+		Provider:     "grok_web",
+		Streaming:    &streaming,
+		StatusCode:   200,
+		OutputTokens: 500,
+		DurationMS:   3000,
+		FirstTokenMS: 100,
+	})
+	if class != ClassIgnored || reason != "non_build_provider" {
+		t.Fatalf("got %s/%s", class, reason)
+	}
+}

@@ -6,10 +6,14 @@ import (
 	"log/slog"
 	"math/rand"
 	"strconv"
+	"strings"
 	"time"
 
+	auditapp "github.com/chenyme/grok2api/backend/internal/application/audit"
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
+	auditdomain "github.com/chenyme/grok2api/backend/internal/domain/audit"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
 // Guard runs passive/active cycles and executes Resin lease actions.
@@ -19,10 +23,13 @@ type Guard struct {
 	resin      *ResinClient
 	store      *stateStore
 	clientKeys *clientkeyapp.Service
+	audits     *auditapp.Service
 }
 
-// NewGuard constructs a guard. clientKeys may be nil (then only env ProbeAPIKey works).
-func NewGuard(cfg Config, logger *slog.Logger, clientKeys *clientkeyapp.Service) *Guard {
+// NewGuard constructs a guard.
+// clientKeys may be nil (then only env ProbeAPIKey works).
+// audits may be nil (then passive quality classification is skipped).
+func NewGuard(cfg Config, logger *slog.Logger, clientKeys *clientkeyapp.Service, audits *auditapp.Service) *Guard {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -31,6 +38,7 @@ func NewGuard(cfg Config, logger *slog.Logger, clientKeys *clientkeyapp.Service)
 		log:        logger.With("component", "resin_quality_guard"),
 		store:      newStateStore(cfg.StateFile),
 		clientKeys: clientKeys,
+		audits:     audits,
 	}
 	if cfg.CanRun() {
 		g.resin = NewResinClient(cfg.ResinBaseURL, cfg.ResinAdminToken, cfg.RequestTimeout)
@@ -279,11 +287,147 @@ func (g *Guard) Run(ctx context.Context) error {
 }
 
 func (g *Guard) runPassiveCycle(ctx context.Context) {
-	// Passive is reserved for audit feed wiring; still drive recovery + heartbeat.
 	g.tryRecover(ctx)
+	g.consumeNewAudits(ctx)
 	g.store.update(func(st *State) {
 		st.LastPassivePollAt = float64(time.Now().Unix())
 	})
+}
+
+// consumeNewAudits reads successful stream audits newer than the watermark and classifies TPS.
+func (g *Guard) consumeNewAudits(ctx context.Context) {
+	if g.audits == nil {
+		return
+	}
+	snap := g.store.snapshot()
+
+	const pageSize = 100
+	filter := auditapp.ListFilter{
+		Status: "success",
+		Mode:   "stream",
+		Sort:   repository.SortQuery{Field: "createdAt", Direction: repository.SortDescending},
+	}
+	result, err := g.audits.ListCursor(ctx, "", pageSize, "", "24h", filter)
+	if err != nil {
+		g.log.Warn("passive_list_audits_failed", "error", err)
+		return
+	}
+	if len(result.Items) == 0 {
+		return
+	}
+
+	// First run: baseline only — remember newest ID, do not classify backlog.
+	if !snap.PassiveInitialized {
+		newest := result.Items[0].ID
+		g.store.update(func(st *State) {
+			st.PassiveInitialized = true
+			st.PassiveWatermarkID = newest
+		})
+		g.log.Info("passive_baseline_initialized", "watermark_id", newest, "page_size", len(result.Items))
+		return
+	}
+
+	watermark := snap.PassiveWatermarkID
+	// Items are newest-first; collect those with ID > watermark, then process oldest-first.
+	var batch []AuditSample
+	var maxSeen uint64 = watermark
+	for _, rec := range result.Items {
+		if rec.ID <= watermark {
+			break
+		}
+		if rec.ID > maxSeen {
+			maxSeen = rec.ID
+		}
+		// While quarantined, only advance watermark so recovery is not hit by stale backlog.
+		if snap.Pool.QuarantineActive {
+			continue
+		}
+		// Skip our own quality probes (by key name heuristic).
+		name := strings.ToLower(rec.ClientKeyName)
+		if strings.Contains(name, "quality-guard") || strings.Contains(name, "resin-qg") || strings.Contains(name, "resin-guard") {
+			continue
+		}
+		// Only chat/responses-style generation traffic is meaningful for TPS.
+		switch rec.Operation {
+		case auditdomain.OperationChat, auditdomain.OperationResponses, auditdomain.OperationMessages, "":
+			// ok
+		default:
+			continue
+		}
+		batch = append(batch, auditRecordToSample(rec))
+	}
+	if maxSeen > watermark {
+		g.store.update(func(st *State) {
+			st.PassiveWatermarkID = maxSeen
+		})
+	}
+	if snap.Pool.QuarantineActive || len(batch) == 0 {
+		return
+	}
+
+	// process oldest first
+	for i := len(batch) - 1; i >= 0; i-- {
+		sample := batch[i]
+		class, reason, speed, tokens := classifyAudit(g.cfg, sample)
+		g.store.update(func(st *State) {
+			st.bump("passive", "total", 1)
+			if class == ClassIgnored {
+				st.bump("passive", "ignored", 1)
+			} else if class == ClassHealthy || class == ClassSoft || class == ClassHard {
+				st.bump("passive", class, 1)
+			}
+			if class != ClassIgnored {
+				st.LastPassiveSampleTS = float64(time.Now().Unix())
+				st.LastPassiveTPS = speed
+			}
+			if sample.ExitIP != "" && (class == ClassSoft || class == ClassHard) {
+				st.Pool.SuspectExitIPs = appendUnique(st.Pool.SuspectExitIPs, sample.ExitIP)
+				if len(st.Pool.SuspectExitIPs) > 20 {
+					st.Pool.SuspectExitIPs = st.Pool.SuspectExitIPs[len(st.Pool.SuspectExitIPs)-20:]
+				}
+				st.Pool.LastExitIP = sample.ExitIP
+			}
+		})
+		if class == ClassIgnored {
+			continue
+		}
+		g.log.Info("passive_audit_sample",
+			"audit_id", sample.ID,
+			"class", class,
+			"reason", reason,
+			"tps", speed,
+			"tokens", tokens,
+			"provider", sample.Provider,
+			"exit_ip", sample.ExitIP,
+		)
+		g.observe(class, reason, speed, "passive")
+	}
+}
+
+func auditRecordToSample(rec auditdomain.Record) AuditSample {
+	streaming := rec.Streaming
+	firstTokenMS := int64(-1)
+	if rec.FirstTokenMS != nil {
+		firstTokenMS = *rec.FirstTokenMS
+	}
+	// Visible generation tokens only (exclude pure reasoning if broken out).
+	tokens := rec.OutputTokens
+	if tokens <= 0 && rec.ReasoningTokens > 0 {
+		tokens = rec.ReasoningTokens
+	}
+	return AuditSample{
+		ID:           strconv.FormatUint(rec.ID, 10),
+		Provider:     rec.Provider,
+		Streaming:    &streaming,
+		Status:       "success",
+		StatusCode:   rec.StatusCode,
+		ErrorCode:    rec.ErrorCode,
+		OutputTokens: tokens,
+		DurationMS:   rec.DurationMS,
+		FirstTokenMS: firstTokenMS,
+		// Audit schema has no resin exit IP; leave empty (pool reshuffle does not need it).
+		ExitIP: "",
+	}
 }
 
 func (g *Guard) runActiveCycle(ctx context.Context) {

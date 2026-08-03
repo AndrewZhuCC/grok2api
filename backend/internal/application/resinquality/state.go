@@ -53,6 +53,12 @@ type State struct {
 	StartedAt          float64   `json:"startedAt"`
 	UpdatedAt          float64   `json:"updatedAt"`
 	SelectedProbeKeyID uint64    `json:"selectedProbeKeyId,omitempty"` // UI-chosen client key; 0 = auto
+	// PassiveWatermarkID is the highest audit ID already processed by passive cycle.
+	// On first run we set it to the newest ID without classifying (baseline).
+	PassiveWatermarkID  uint64  `json:"passiveWatermarkId,omitempty"`
+	PassiveInitialized  bool    `json:"passiveInitialized,omitempty"`
+	LastPassiveSampleTS float64 `json:"lastPassiveSampleTs,omitempty"`
+	LastPassiveTPS      float64 `json:"lastPassiveTps,omitempty"`
 }
 
 func defaultState() State {
