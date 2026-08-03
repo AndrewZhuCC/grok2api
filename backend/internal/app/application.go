@@ -23,6 +23,7 @@ import (
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	quotarecoveryapp "github.com/chenyme/grok2api/backend/internal/application/quotarecovery"
+	resinqualityapp "github.com/chenyme/grok2api/backend/internal/application/resinquality"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
 	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
 	"github.com/chenyme/grok2api/backend/internal/buildinfo"
@@ -81,6 +82,7 @@ type Application struct {
 	web             *webprovider.Adapter
 	egress          *infraegress.Manager
 	egressOps       *egressapp.Service
+	resinQuality    *resinqualityapp.Guard
 	startup         *startupState
 }
 
@@ -362,18 +364,40 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	})
 	updateService := updatecheckapp.NewService(buildinfo.CurrentVersion(), nil)
 
+	resinQualityCfg := resinqualityapp.LoadConfigFromEnv()
+	// Default probe base to this process listen address when not set (in-process client key path).
+	if resinQualityCfg.ProbeBaseURL == "" && resinQualityCfg.Enabled {
+		resinQualityCfg.ProbeBaseURL = "http://127.0.0.1" + normalizeListenForLoopback(cfg.Server.Listen)
+	}
+	resinQualityGuard := resinqualityapp.NewGuard(resinQualityCfg, logger)
+
 	startup := newStartupState(len(windows))
 	readiness := func(readyCtx context.Context) httpserver.ReadinessSnapshot {
 		return readinessSnapshot(readyCtx, startup, runtimeHealth, modelRepo, accountRepo, providers, auditService)
 	}
-	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, Updates: updateService})
+	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, ResinQualityGuard: resinQualityGuard, Updates: updateService})
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	return &Application{
 		logger: logger, database: database, server: server,
 		audits: auditService, responses: responseRepo, cleanupLock: refreshLock, runtime: runtimeStore,
 		settingsBus: settingsBus, invalidationBus: invalidationBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, accounts: accountService, models: modelService, clientKeys: clientKeyService, updates: updateService, invalidations: invalidationService,
-		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, egress: egressManager, egressOps: egressService, startup: startup,
+		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, egress: egressManager, egressOps: egressService, resinQuality: resinQualityGuard, startup: startup,
 	}, nil
+}
+
+func normalizeListenForLoopback(listen string) string {
+	listen = strings.TrimSpace(listen)
+	if listen == "" {
+		return ":8000"
+	}
+	if strings.HasPrefix(listen, ":") {
+		return listen
+	}
+	// host:port → keep :port for 127.0.0.1
+	if i := strings.LastIndex(listen, ":"); i >= 0 {
+		return listen[i:]
+	}
+	return ":" + listen
 }
 
 func invalidationSourceInstance(cfg config.Config) string {
@@ -471,6 +495,9 @@ func (a *Application) Run(ctx context.Context) error {
 	if a.invalidationBus != nil {
 		startBackground("invalidation_publisher", a.invalidations.RunPublisher)
 		startBackground("invalidation_subscriber", a.invalidations.RunSubscriber)
+	}
+	if a.resinQuality != nil && a.resinQuality.Enabled() {
+		startBackground("resin_quality_guard", a.resinQuality.Run)
 	}
 	startBackground("settings_reconcile", func(taskCtx context.Context) error {
 		a.runPeriodicTask(taskCtx, 30*time.Second, "settings_reconcile", func(runCtx context.Context) error {

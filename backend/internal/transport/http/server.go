@@ -17,6 +17,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
+	resinqualityapp "github.com/chenyme/grok2api/backend/internal/application/resinquality"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
 	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
@@ -29,6 +30,7 @@ import (
 	mediahttp "github.com/chenyme/grok2api/backend/internal/transport/http/media"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	modelhttp "github.com/chenyme/grok2api/backend/internal/transport/http/model"
+	resinqualityhttp "github.com/chenyme/grok2api/backend/internal/transport/http/resinquality"
 	settingshttp "github.com/chenyme/grok2api/backend/internal/transport/http/settings"
 	systemhttp "github.com/chenyme/grok2api/backend/internal/transport/http/system"
 	"github.com/gin-gonic/gin"
@@ -46,21 +48,22 @@ type Dependencies struct {
 	PublicAPIBaseURL   string
 	FrontendStaticPath string
 	// Readiness 返回可观测的分层就绪状态。Ready 仅为旧调用方保留。
-	Readiness    func(context.Context) ReadinessSnapshot
-	Ready        func(context.Context) bool
-	TrafficReady func() bool
-	AdminAuth    *adminauthapp.Service
-	Accounts     *accountapp.Service
-	AccountSync  *accountsyncapp.Service
-	Models       *modelapp.Service
-	ClientKeys   *clientkeyapp.Service
-	Audits       *auditapp.Service
-	Dashboard    *dashboardapp.Service
-	Gateway      *gateway.Service
-	Media        *mediaapp.Service
-	Settings     *settingsapp.Service
-	Egress       *egressapp.Service
-	Updates      *updatecheckapp.Service
+	Readiness         func(context.Context) ReadinessSnapshot
+	Ready             func(context.Context) bool
+	TrafficReady      func() bool
+	AdminAuth         *adminauthapp.Service
+	Accounts          *accountapp.Service
+	AccountSync       *accountsyncapp.Service
+	Models            *modelapp.Service
+	ClientKeys        *clientkeyapp.Service
+	Audits            *auditapp.Service
+	Dashboard         *dashboardapp.Service
+	Gateway           *gateway.Service
+	Media             *mediaapp.Service
+	Settings          *settingsapp.Service
+	Egress            *egressapp.Service
+	ResinQualityGuard *resinqualityapp.Guard
+	Updates           *updatecheckapp.Service
 }
 
 type ReadinessComponent struct {
@@ -149,6 +152,7 @@ func New(deps Dependencies) *gin.Engine {
 	mediaHandler.RegisterAdmin(adminProtected)
 	settingshttp.NewHandler(deps.Settings).Register(adminProtected)
 	egresshttp.NewHandler(deps.Egress).Register(adminProtected)
+	resinqualityhttp.NewHandler(deps.ResinQualityGuard).Register(adminProtected)
 	systemhttp.NewHandler(func() string {
 		if deps.Settings != nil {
 			return deps.Settings.PublicAPIBaseURL()
