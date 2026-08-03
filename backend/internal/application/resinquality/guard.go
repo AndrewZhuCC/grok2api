@@ -81,6 +81,7 @@ type PublicCfg struct {
 	ActiveIntervalSec int     `json:"activeIntervalSeconds"`
 	PassivePollSec    int     `json:"passivePollSeconds"`
 	FailClosed        bool    `json:"failClosed"`
+	ZeroReasoningSoft bool    `json:"zeroReasoningSoft"`
 	PlatformID        string  `json:"platformId"`
 	CanProbe          bool    `json:"canProbe"`
 	HasProxyURL       bool    `json:"hasProxyUrl"`
@@ -100,11 +101,12 @@ func (g *Guard) publicCfg() PublicCfg {
 		ActiveIntervalSec: int(g.cfg.ActiveInterval.Seconds()),
 		PassivePollSec:    int(g.cfg.PassivePoll.Seconds()),
 		FailClosed:        g.cfg.FailClosed,
+		ZeroReasoningSoft: g.cfg.ZeroReasoningSoft,
 		PlatformID:        g.cfg.PlatformID,
 		CanProbe:          g.canProbe(),
 		HasProxyURL:       g.cfg.ResinProxyURL != "",
 		ProbeModel:        g.cfg.ProbeModel,
-		AutoSelectKey:     g.clientKeys != nil && g.cfg.ProbeAPIKey == "",
+		AutoSelectKey:     g.cfg.ProbeAPIKey == "" && g.clientKeys != nil,
 	}
 }
 
@@ -416,15 +418,17 @@ func auditRecordToSample(rec auditdomain.Record) AuditSample {
 		tokens = rec.ReasoningTokens
 	}
 	return AuditSample{
-		ID:           strconv.FormatUint(rec.ID, 10),
-		Provider:     rec.Provider,
-		Streaming:    &streaming,
-		Status:       "success",
-		StatusCode:   rec.StatusCode,
-		ErrorCode:    rec.ErrorCode,
-		OutputTokens: tokens,
-		DurationMS:   rec.DurationMS,
-		FirstTokenMS: firstTokenMS,
+		ID:              strconv.FormatUint(rec.ID, 10),
+		Provider:        rec.Provider,
+		Streaming:       &streaming,
+		Status:          "success",
+		StatusCode:      rec.StatusCode,
+		ErrorCode:       rec.ErrorCode,
+		OutputTokens:    tokens,
+		ReasoningTokens: rec.ReasoningTokens,
+		ReasoningKnown:  true,
+		DurationMS:      rec.DurationMS,
+		FirstTokenMS:    firstTokenMS,
 		// Audit schema has no resin exit IP; leave empty (pool reshuffle does not need it).
 		ExitIP: "",
 	}

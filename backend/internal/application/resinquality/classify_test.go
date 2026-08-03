@@ -81,3 +81,80 @@ func TestClassifyAuditNonBuildIgnored(t *testing.T) {
 		t.Fatalf("got %s/%s", class, reason)
 	}
 }
+
+func TestClassifyAuditZeroReasoningSoftDespiteShortGen(t *testing.T) {
+	cfg := Config{
+		SoftTPS:           500,
+		HardTPS:           1000,
+		MinGeneration:     time.Second,
+		MinOutputTokens:   32,
+		ZeroReasoningSoft: true,
+	}
+	streaming := true
+	// Real degraded pattern: long TTFT, tiny generation window, reasoningTokens=0.
+	// TPS path alone would ignore; zero-reasoning OR must catch it as soft.
+	class, reason, _, _ := classifyAudit(cfg, AuditSample{
+		Provider:        "grok_build",
+		Streaming:       &streaming,
+		Status:          "success",
+		StatusCode:      200,
+		OutputTokens:    86,
+		ReasoningTokens: 0,
+		ReasoningKnown:  true,
+		DurationMS:      9807,
+		FirstTokenMS:    9796,
+	})
+	if class != ClassSoft || reason != "zero_reasoning" {
+		t.Fatalf("got %s/%s", class, reason)
+	}
+}
+
+func TestClassifyAuditZeroReasoningORHardTPS(t *testing.T) {
+	cfg := Config{
+		SoftTPS:           500,
+		HardTPS:           1000,
+		MinGeneration:     time.Second,
+		MinOutputTokens:   32,
+		ZeroReasoningSoft: true,
+	}
+	streaming := true
+	class, reason, speed, _ := classifyAudit(cfg, AuditSample{
+		Provider:        "grok_build",
+		Streaming:       &streaming,
+		Status:          "success",
+		StatusCode:      200,
+		OutputTokens:    2000,
+		ReasoningTokens: 0,
+		ReasoningKnown:  true,
+		DurationMS:      2200,
+		FirstTokenMS:    200,
+	})
+	if class != ClassHard || reason != "hard_tps" {
+		t.Fatalf("got %s/%s speed=%v", class, reason, speed)
+	}
+}
+
+func TestClassifyAuditReasoningPresentKeepsHealthy(t *testing.T) {
+	cfg := Config{
+		SoftTPS:           500,
+		HardTPS:           1000,
+		MinGeneration:     time.Second,
+		MinOutputTokens:   32,
+		ZeroReasoningSoft: true,
+	}
+	streaming := true
+	class, reason, _, _ := classifyAudit(cfg, AuditSample{
+		Provider:        "grok_build",
+		Streaming:       &streaming,
+		Status:          "success",
+		StatusCode:      200,
+		OutputTokens:    200,
+		ReasoningTokens: 88,
+		ReasoningKnown:  true,
+		DurationMS:      2200,
+		FirstTokenMS:    200,
+	})
+	if class != ClassHealthy || reason != "ok" {
+		t.Fatalf("got %s/%s", class, reason)
+	}
+}

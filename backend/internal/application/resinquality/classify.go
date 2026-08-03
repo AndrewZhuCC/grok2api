@@ -65,16 +65,41 @@ func classifyProbe(cfg Config, result ProbeResult) (class, reason string) {
 
 // AuditSample is a minimal passive audit record (from local gateway if wired later).
 type AuditSample struct {
-	ID           string
-	Provider     string
-	Streaming    *bool
-	Status       string
-	StatusCode   int
-	ErrorCode    string
-	OutputTokens int64
-	DurationMS   int64
-	FirstTokenMS int64
-	ExitIP       string
+	ID              string
+	Provider        string
+	Streaming       *bool
+	Status          string
+	StatusCode      int
+	ErrorCode       string
+	OutputTokens    int64
+	ReasoningTokens int64
+	DurationMS      int64
+	FirstTokenMS    int64
+	ExitIP          string
+	ReasoningKnown  bool // false when field unavailable (e.g. some probes)
+}
+
+func classRank(class string) int {
+	switch class {
+	case ClassHard:
+		return 4
+	case ClassError:
+		return 3
+	case ClassSoft:
+		return 2
+	case ClassHealthy:
+		return 1
+	default:
+		return 0 // ignored / unknown
+	}
+}
+
+// mergeClass picks the worse of two classifications (OR-style degradation signals).
+func mergeClass(aClass, aReason, bClass, bReason string) (class, reason string) {
+	if classRank(aClass) >= classRank(bClass) {
+		return aClass, aReason
+	}
+	return bClass, bReason
 }
 
 func classifyAudit(cfg Config, sample AuditSample) (class, reason string, speed float64, tokens int64) {
@@ -98,7 +123,23 @@ func classifyAudit(cfg Config, sample AuditSample) (class, reason string, speed 
 	if sample.FirstTokenMS < 0 {
 		return ClassIgnored, "missing_first_token", 0, sample.OutputTokens
 	}
+	tokens = sample.OutputTokens
 	speed = outputTokensPerSecond(sample.OutputTokens, sample.DurationMS, sample.FirstTokenMS)
-	class, reason = classifySpeed(cfg, speed, sample.OutputTokens, sample.DurationMS, sample.FirstTokenMS, nil)
-	return class, reason, speed, sample.OutputTokens
+	tpsClass, tpsReason := classifySpeed(cfg, speed, sample.OutputTokens, sample.DurationMS, sample.FirstTokenMS, nil)
+
+	// Zero-reasoning signal: OR with TPS. Does not require a long generation window,
+	// because degraded exits often dump a short buffered body after long TTFT.
+	reasonClass, reasonReason := ClassIgnored, "reasoning_not_checked"
+	if cfg.ZeroReasoningSoft && sample.ReasoningKnown {
+		if sample.OutputTokens < int64(cfg.MinOutputTokens) {
+			reasonClass, reasonReason = ClassIgnored, "insufficient_output_tokens"
+		} else if sample.ReasoningTokens <= 0 {
+			reasonClass, reasonReason = ClassSoft, "zero_reasoning"
+		} else {
+			reasonClass, reasonReason = ClassHealthy, "reasoning_present"
+		}
+	}
+
+	class, reason = mergeClass(tpsClass, tpsReason, reasonClass, reasonReason)
+	return class, reason, speed, tokens
 }

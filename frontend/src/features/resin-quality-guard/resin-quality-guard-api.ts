@@ -12,6 +12,7 @@ export type ResinQualityPublicCfg = {
   activeIntervalSeconds: number;
   passivePollSeconds: number;
   failClosed: boolean;
+  zeroReasoningSoft?: boolean;
   platformId: string;
   canProbe: boolean;
   hasProxyUrl: boolean;
@@ -86,6 +87,7 @@ const configShape = hasShape({
   activeIntervalSeconds: isNumber,
   passivePollSeconds: isNumber,
   failClosed: isBoolean,
+  zeroReasoningSoft: isOptional(isBoolean),
   platformId: isString,
   canProbe: isBoolean,
   hasProxyUrl: isBoolean,

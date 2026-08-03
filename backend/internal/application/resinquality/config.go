@@ -30,6 +30,9 @@ type Config struct {
 	PassivePoll       time.Duration
 	Jitter            time.Duration
 	FailClosed        bool
+	// ZeroReasoningSoft treats successful build stream samples with reasoningTokens==0
+	// as soft degradation, OR-combined with TPS classification.
+	ZeroReasoningSoft bool
 	RequestTimeout    time.Duration
 	StateFile         string
 
@@ -64,6 +67,8 @@ func LoadConfigFromEnv() Config {
 		PassivePoll:       time.Duration(envInt("RESIN_QUALITY_GUARD_PASSIVE_POLL_SECONDS", 5)) * time.Second,
 		Jitter:            time.Duration(envInt("RESIN_QUALITY_GUARD_JITTER_SECONDS", 30)) * time.Second,
 		FailClosed:        envBool("RESIN_QUALITY_GUARD_FAIL_CLOSED", false),
+		// Default on: live grok-4.5 degraded exits often show reasoningTokens=0.
+		ZeroReasoningSoft: envBool("RESIN_QUALITY_GUARD_ZERO_REASONING_SOFT", true),
 		RequestTimeout:    time.Duration(envInt("RESIN_QUALITY_GUARD_REQUEST_TIMEOUT_SECONDS", 60)) * time.Second,
 		StateFile:         envStr("RESIN_QUALITY_GUARD_STATE_FILE", "/app/data/resin-quality-guard-state.json"),
 		ProbeBaseURL:      strings.TrimRight(envStr("RESIN_QUALITY_GUARD_PROBE_BASE_URL", ""), "/"),
