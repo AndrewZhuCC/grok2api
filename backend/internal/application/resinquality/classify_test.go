@@ -158,3 +158,31 @@ func TestClassifyAuditReasoningPresentKeepsHealthy(t *testing.T) {
 		t.Fatalf("got %s/%s", class, reason)
 	}
 }
+
+func TestZeroReasoningIsImmediateSoftSignal(t *testing.T) {
+	// Contract for observe(): reason "zero_reasoning" must be one-hit quarantine.
+	// This unit test locks the classification contract that drives that path.
+	cfg := Config{
+		SoftTPS:           500,
+		HardTPS:           1000,
+		MinGeneration:     time.Second,
+		MinOutputTokens:   32,
+		ZeroReasoningSoft: true,
+		ConsecutiveSoft:   2,
+	}
+	streaming := true
+	class, reason, _, _ := classifyAudit(cfg, AuditSample{
+		Provider:        "grok_build",
+		Streaming:       &streaming,
+		Status:          "success",
+		StatusCode:      200,
+		OutputTokens:    100,
+		ReasoningTokens: 0,
+		ReasoningKnown:  true,
+		DurationMS:      5000,
+		FirstTokenMS:    4900,
+	})
+	if class != ClassSoft || reason != "zero_reasoning" {
+		t.Fatalf("expected immediate soft zero_reasoning, got %s/%s", class, reason)
+	}
+}

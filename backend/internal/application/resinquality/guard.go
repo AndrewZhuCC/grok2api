@@ -371,6 +371,7 @@ func (g *Guard) consumeNewAudits(ctx context.Context) {
 	for i := len(batch) - 1; i >= 0; i-- {
 		sample := batch[i]
 		class, reason, speed, tokens := classifyAudit(g.cfg, sample)
+		now := float64(time.Now().Unix())
 		g.store.update(func(st *State) {
 			st.bump("passive", "total", 1)
 			if class == ClassIgnored {
@@ -379,8 +380,11 @@ func (g *Guard) consumeNewAudits(ctx context.Context) {
 				st.bump("passive", class, 1)
 			}
 			if class != ClassIgnored {
-				st.LastPassiveSampleTS = float64(time.Now().Unix())
+				st.LastPassiveSampleTS = now
 				st.LastPassiveTPS = speed
+				st.LastPassiveReason = reason
+				st.LastPassiveClass = class
+				st.LastPassiveAuditID = sample.ID
 			}
 			if sample.ExitIP != "" && (class == ClassSoft || class == ClassHard) {
 				st.Pool.SuspectExitIPs = appendUnique(st.Pool.SuspectExitIPs, sample.ExitIP)
@@ -388,6 +392,16 @@ func (g *Guard) consumeNewAudits(ctx context.Context) {
 					st.Pool.SuspectExitIPs = st.Pool.SuspectExitIPs[len(st.Pool.SuspectExitIPs)-20:]
 				}
 				st.Pool.LastExitIP = sample.ExitIP
+			}
+			if class == ClassSoft {
+				st.appendSoftSample(SoftSample{
+					TS: now, AuditID: sample.ID, Reason: reason, OutputTPS: speed,
+					Tokens: tokens, Source: "passive", ExitIP: sample.ExitIP,
+				})
+				st.appendEvent(Event{
+					TS: now, Event: "soft_sample", Reason: reason, Classification: class,
+					OutputTPS: speed, ExitIP: sample.ExitIP, AuditID: sample.ID, Source: "passive", Tokens: tokens,
+				})
 			}
 		})
 		if class == ClassIgnored {
@@ -504,6 +518,10 @@ func (g *Guard) observe(class, reason string, speed float64, source string) {
 		st.Pool.LastObservedAt = now
 		st.Pool.LastClassification = class
 		st.Pool.LastOutputTPS = speed
+		// Always keep the latest non-empty reason visible in UI, including healthy ok.
+		if reason != "" {
+			st.Pool.LastReason = reason
+		}
 		if class == ClassIgnored {
 			return
 		}
@@ -514,7 +532,10 @@ func (g *Guard) observe(class, reason string, speed float64, source string) {
 		}
 		if class == ClassSoft {
 			st.Pool.SoftStrikes++
-			if g.cfg.FailClosed || st.Pool.SoftStrikes >= g.cfg.ConsecutiveSoft {
+			// zero_reasoning is immediate (1 hit). Other soft reasons still honor consecutiveSoft,
+			// unless fail-closed is enabled.
+			immediate := reason == "zero_reasoning"
+			if immediate || g.cfg.FailClosed || st.Pool.SoftStrikes >= g.cfg.ConsecutiveSoft {
 				shouldQuarantine = true
 				qReason, qClass, qSpeed = reason, class, speed
 			}

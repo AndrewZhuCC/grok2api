@@ -27,6 +27,13 @@ function formatTs(ts?: number): string {
   }
 }
 
+function formatAge(ts?: number, t?: (key: string, opts?: Record<string, string>) => string): string {
+  if (!ts) return "—";
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (t) return `${formatTs(ts)} · ${t("resinQualityGuard.secondsAgo", { n: String(seconds) })}`;
+  return `${formatTs(ts)} · ${seconds}s ago`;
+}
+
 export function ResinQualityGuardPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -166,9 +173,14 @@ export function ResinQualityGuardPage() {
             <InfoCard label={t("resinQualityGuard.status")} value={pool?.quarantineActive ? t("resinQualityGuard.quarantined") : t("resinQualityGuard.healthy")}>
               <Badge variant={pool?.quarantineActive ? "destructive" : "secondary"}>{pool?.lastClassification || "—"}</Badge>
             </InfoCard>
+            <InfoCard label={t("resinQualityGuard.lastPassiveReason")} value={status?.state?.lastPassiveReason || pool?.lastReason || "—"}>
+              {status?.state?.lastPassiveClass ? <Badge variant="outline">{status.state.lastPassiveClass}</Badge> : null}
+            </InfoCard>
+            <InfoCard
+              label={t("resinQualityGuard.lastTps")}
+              value={(status?.state?.lastPassiveTps ?? pool?.lastOutputTps) != null ? Number(status?.state?.lastPassiveTps ?? pool?.lastOutputTps).toFixed(1) : "—"}
+            />
             <InfoCard label={t("resinQualityGuard.lastExitIp")} value={pool?.lastExitIp || "—"} />
-            <InfoCard label={t("resinQualityGuard.lastTps")} value={pool?.lastOutputTps != null ? pool.lastOutputTps.toFixed(1) : "—"} />
-            <InfoCard label={t("resinQualityGuard.mode")} value={`${cfg?.mode ?? "—"} / ${cfg?.actionMode ?? "—"}`} />
           </div>
 
           <div className="grid gap-4 lg:grid-cols-2">
@@ -178,9 +190,20 @@ export function ResinQualityGuardPage() {
                 {t("resinQualityGuard.pool")}
               </h2>
               <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+                <dt className="text-muted-foreground">{t("resinQualityGuard.passiveHeartbeat")}</dt>
+                <dd>{formatAge(status?.state?.lastPassivePollAt, t)}</dd>
+                <dt className="text-muted-foreground">{t("resinQualityGuard.lastPassiveSample")}</dt>
+                <dd>{formatAge(status?.state?.lastPassiveSampleTs, t)}</dd>
+                <dt className="text-muted-foreground">{t("resinQualityGuard.lastPassiveClass")}</dt>
+                <dd className="truncate">{status?.state?.lastPassiveClass || pool?.lastClassification || "—"}</dd>
+                <dt className="text-muted-foreground">{t("resinQualityGuard.lastReason")}</dt>
+                <dd className="truncate">{status?.state?.lastPassiveReason || pool?.lastReason || "—"}</dd>
+                <dt className="text-muted-foreground">{t("resinQualityGuard.auditId")}</dt>
+                <dd className="truncate">{status?.state?.lastPassiveAuditId || "—"}</dd>
                 <dt className="text-muted-foreground">{t("resinQualityGuard.softStrikes")}</dt>
                 <dd>
                   {pool?.softStrikes ?? 0} / {cfg?.consecutiveSoft ?? "—"}
+                  {cfg?.zeroReasoningSoft ? " · zero_reasoning=1-hit" : ""}
                 </dd>
                 <dt className="text-muted-foreground">{t("resinQualityGuard.errorStrikes")}</dt>
                 <dd>
@@ -188,13 +211,15 @@ export function ResinQualityGuardPage() {
                 </dd>
                 <dt className="text-muted-foreground">{t("resinQualityGuard.quarantineUntil")}</dt>
                 <dd>{formatTs(pool?.quarantinedUntil)}</dd>
-                <dt className="text-muted-foreground">{t("resinQualityGuard.lastReason")}</dt>
-                <dd className="truncate">{pool?.lastReason || "—"}</dd>
                 <dt className="text-muted-foreground">{t("resinQualityGuard.suspectIps")}</dt>
                 <dd className="truncate">{(pool?.suspectExitIps || []).join(", ") || "—"}</dd>
                 <dt className="text-muted-foreground">{t("resinQualityGuard.thresholds")}</dt>
                 <dd>
                   soft {cfg?.softTps} / hard {cfg?.hardTps}
+                </dd>
+                <dt className="text-muted-foreground">{t("resinQualityGuard.mode")}</dt>
+                <dd>
+                  {cfg?.mode ?? "—"} / {cfg?.actionMode ?? "—"}
                 </dd>
               </dl>
             </section>
@@ -202,6 +227,10 @@ export function ResinQualityGuardPage() {
             <section className="rounded-xl border p-4">
               <h2 className="mb-3 text-sm font-medium">{t("resinQualityGuard.stats")}</h2>
               <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+                <dt className="text-muted-foreground">{t("resinQualityGuard.passiveStats")}</dt>
+                <dd>
+                  {stats?.passive?.total ?? 0}/{stats?.passive?.healthy ?? 0}/{stats?.passive?.soft ?? 0}/{stats?.passive?.hard ?? 0}/{stats?.passive?.ignored ?? 0}
+                </dd>
                 <dt className="text-muted-foreground">active total</dt>
                 <dd>{stats?.active?.total ?? 0}</dd>
                 <dt className="text-muted-foreground">active hard/soft/error</dt>
@@ -215,10 +244,30 @@ export function ResinQualityGuardPage() {
                 <dt className="text-muted-foreground">reshuffles</dt>
                 <dd>{stats?.actions?.reshuffles ?? 0}</dd>
                 <dt className="text-muted-foreground">last active cycle</dt>
-                <dd>{formatTs(status?.state?.lastActiveCycleAt)}</dd>
+                <dd>{formatAge(status?.state?.lastActiveCycleAt, t)}</dd>
               </dl>
             </section>
           </div>
+
+          <section className="rounded-xl border p-4">
+            <h2 className="mb-3 text-sm font-medium">{t("resinQualityGuard.recentSoftSamples")}</h2>
+            {(status?.state?.recentSoftSamples?.length ?? 0) === 0 ? (
+              <p className="text-sm text-muted-foreground">{t("resinQualityGuard.noSoftSamples")}</p>
+            ) : (
+              <div className="max-h-64 space-y-2 overflow-auto text-sm">
+                {[...(status?.state?.recentSoftSamples ?? [])].reverse().slice(0, 20).map((sample, index) => (
+                  <div key={`${sample.ts}-${sample.auditId ?? index}`} className="flex flex-wrap gap-x-3 gap-y-1 border-b border-border/50 py-2 last:border-0">
+                    <span className="text-muted-foreground">{formatAge(sample.ts, t)}</span>
+                    <Badge variant="destructive">{sample.reason || "soft"}</Badge>
+                    {sample.auditId ? <span>{t("resinQualityGuard.auditId")} {sample.auditId}</span> : null}
+                    {sample.outputTps != null ? <span>TPS {sample.outputTps.toFixed(1)}</span> : null}
+                    {sample.tokens != null ? <span>{t("resinQualityGuard.tokens")} {sample.tokens}</span> : null}
+                    {sample.exitIp ? <span className="text-muted-foreground">{sample.exitIp}</span> : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
 
           <section className="rounded-xl border p-4">
             <h2 className="mb-3 text-sm font-medium">{t("resinQualityGuard.events")}</h2>
@@ -232,6 +281,8 @@ export function ResinQualityGuardPage() {
                     <span className="font-medium">{ev.event}</span>
                     {ev.reason ? <span>{ev.reason}</span> : null}
                     {ev.classification ? <Badge variant="outline">{ev.classification}</Badge> : null}
+                    {ev.auditId ? <span className="text-muted-foreground">#{ev.auditId}</span> : null}
+                    {ev.outputTps != null ? <span>TPS {ev.outputTps.toFixed(1)}</span> : null}
                     {ev.exitIp ? <span className="text-muted-foreground">{ev.exitIp}</span> : null}
                     {typeof ev.cleared === "number" ? <span>cleared={ev.cleared}</span> : null}
                   </div>

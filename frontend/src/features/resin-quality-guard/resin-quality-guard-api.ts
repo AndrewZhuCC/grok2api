@@ -42,6 +42,19 @@ export type ResinQualityEvent = {
   outputTps?: number;
   exitIp?: string;
   cleared?: number;
+  auditId?: string;
+  source?: string;
+  tokens?: number;
+};
+
+export type ResinSoftSample = {
+  ts: number;
+  auditId?: string;
+  reason?: string;
+  outputTps?: number;
+  tokens?: number;
+  source?: string;
+  exitIp?: string;
 };
 
 export type ResinProbeKeyOption = {
@@ -71,6 +84,12 @@ export type ResinQualityStatus = {
     startedAt: number;
     updatedAt: number;
     selectedProbeKeyId?: number;
+    lastPassiveSampleTs?: number;
+    lastPassiveTps?: number;
+    lastPassiveReason?: string;
+    lastPassiveClass?: string;
+    lastPassiveAuditId?: string;
+    recentSoftSamples?: ResinSoftSample[];
   };
 };
 
@@ -117,6 +136,19 @@ const eventShape = hasShape({
   outputTps: isOptional(isNumber),
   exitIp: isOptional(isString),
   cleared: isOptional(isNumber),
+  auditId: isOptional(isString),
+  source: isOptional(isString),
+  tokens: isOptional(isNumber),
+});
+
+const softSampleShape = hasShape({
+  ts: isNumber,
+  auditId: isOptional(isString),
+  reason: isOptional(isString),
+  outputTps: isOptional(isNumber),
+  tokens: isOptional(isNumber),
+  source: isOptional(isString),
+  exitIp: isOptional(isString),
 });
 
 const probeKeyShape = hasShape({
@@ -139,6 +171,12 @@ const stateShape = hasShape({
   startedAt: isNumber,
   updatedAt: isNumber,
   selectedProbeKeyId: isOptional(isNumber),
+  lastPassiveSampleTs: isOptional(isNumber),
+  lastPassiveTps: isOptional(isNumber),
+  lastPassiveReason: isOptional(isString),
+  lastPassiveClass: isOptional(isString),
+  lastPassiveAuditId: isOptional(isString),
+  recentSoftSamples: isOptional(isArrayOf(softSampleShape)),
 });
 
 const statusDecoder = createObjectDecoder<ResinQualityStatus>("resin quality status", {

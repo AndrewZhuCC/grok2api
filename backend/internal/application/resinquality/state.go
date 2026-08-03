@@ -40,6 +40,20 @@ type Event struct {
 	OutputTPS      float64 `json:"outputTps,omitempty"`
 	ExitIP         string  `json:"exitIp,omitempty"`
 	Cleared        int     `json:"cleared,omitempty"`
+	AuditID        string  `json:"auditId,omitempty"`
+	Source         string  `json:"source,omitempty"`
+	Tokens         int64   `json:"tokens,omitempty"`
+}
+
+// SoftSample is a compact recent soft-hit row for the admin UI.
+type SoftSample struct {
+	TS        float64 `json:"ts"`
+	AuditID   string  `json:"auditId,omitempty"`
+	Reason    string  `json:"reason,omitempty"`
+	OutputTPS float64 `json:"outputTps,omitempty"`
+	Tokens    int64   `json:"tokens,omitempty"`
+	Source    string  `json:"source,omitempty"`
+	ExitIP    string  `json:"exitIp,omitempty"`
 }
 
 // State is persisted JSON.
@@ -55,10 +69,14 @@ type State struct {
 	SelectedProbeKeyID uint64    `json:"selectedProbeKeyId,omitempty"` // UI-chosen client key; 0 = auto
 	// PassiveWatermarkID is the highest audit ID already processed by passive cycle.
 	// On first run we set it to the newest ID without classifying (baseline).
-	PassiveWatermarkID  uint64  `json:"passiveWatermarkId,omitempty"`
-	PassiveInitialized  bool    `json:"passiveInitialized,omitempty"`
-	LastPassiveSampleTS float64 `json:"lastPassiveSampleTs,omitempty"`
-	LastPassiveTPS      float64 `json:"lastPassiveTps,omitempty"`
+	PassiveWatermarkID  uint64       `json:"passiveWatermarkId,omitempty"`
+	PassiveInitialized  bool         `json:"passiveInitialized,omitempty"`
+	LastPassiveSampleTS float64      `json:"lastPassiveSampleTs,omitempty"`
+	LastPassiveTPS      float64      `json:"lastPassiveTps,omitempty"`
+	LastPassiveReason   string       `json:"lastPassiveReason,omitempty"`
+	LastPassiveClass    string       `json:"lastPassiveClass,omitempty"`
+	LastPassiveAuditID  string       `json:"lastPassiveAuditId,omitempty"`
+	RecentSoftSamples   []SoftSample `json:"recentSoftSamples,omitempty"`
 }
 
 func defaultState() State {
@@ -113,6 +131,9 @@ func (s *stateStore) ensureMaps() {
 	if s.cur.Events == nil {
 		s.cur.Events = []Event{}
 	}
+	if s.cur.RecentSoftSamples == nil {
+		s.cur.RecentSoftSamples = []SoftSample{}
+	}
 }
 
 func (s *stateStore) snapshot() State {
@@ -122,6 +143,7 @@ func (s *stateStore) snapshot() State {
 	out := s.cur
 	out.Pool.SuspectExitIPs = append([]string(nil), s.cur.Pool.SuspectExitIPs...)
 	out.Events = append([]Event(nil), s.cur.Events...)
+	out.RecentSoftSamples = append([]SoftSample(nil), s.cur.RecentSoftSamples...)
 	out.Statistics.Passive = copyIntMap(s.cur.Statistics.Passive)
 	out.Statistics.Active = copyIntMap(s.cur.Statistics.Active)
 	out.Statistics.Actions = copyIntMap(s.cur.Statistics.Actions)
@@ -186,6 +208,13 @@ func (st *State) appendEvent(ev Event) {
 	st.Events = append(st.Events, ev)
 	if len(st.Events) > 200 {
 		st.Events = st.Events[len(st.Events)-200:]
+	}
+}
+
+func (st *State) appendSoftSample(sample SoftSample) {
+	st.RecentSoftSamples = append(st.RecentSoftSamples, sample)
+	if len(st.RecentSoftSamples) > 30 {
+		st.RecentSoftSamples = st.RecentSoftSamples[len(st.RecentSoftSamples)-30:]
 	}
 }
 
