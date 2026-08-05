@@ -125,7 +125,12 @@ type Result struct {
 	Body       io.ReadCloser
 	// Provider is the upstream provider that produced this result (e.g. grok_build).
 	// Empty for non-generation paths.
-	Provider            string
+	Provider string
+	// AccountID/AccountName/Model are best-effort routing metadata for diagnostics
+	// (e.g. Resin stream-watch degradation logs). Zero/empty when unknown.
+	AccountID           uint64
+	AccountName         string
+	Model               string
 	MarkFirstToken      func()
 	RecordStreamFailure func(StreamFailureDiagnostic)
 	Finalize            func(usage Usage, responseID, errorCode string)
@@ -1361,7 +1366,12 @@ attemptLoop:
 			markFirstToken = firstToken.mark
 		}
 		timingHandedOff = true
-		return &Result{StatusCode: response.StatusCode, Status: response.Status, Header: response.Header, Body: &finalizingBody{ReadCloser: response.Body, finalize: func() { finalize(Usage{}, "", "stream_closed") }}, Provider: string(route.Provider), MarkFirstToken: markFirstToken, RecordStreamFailure: recordStreamFailure, Finalize: finalize}, nil
+		return &Result{
+			StatusCode: response.StatusCode, Status: response.Status, Header: response.Header,
+			Body: &finalizingBody{ReadCloser: response.Body, finalize: func() { finalize(Usage{}, "", "stream_closed") }},
+			Provider: string(route.Provider), AccountID: credential.ID, AccountName: credential.Name,
+			Model: publicModel, MarkFirstToken: markFirstToken, RecordStreamFailure: recordStreamFailure, Finalize: finalize,
+		}, nil
 	}
 	if lastFailure != nil {
 		record := auditBase

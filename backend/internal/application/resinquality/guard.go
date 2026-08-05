@@ -3,6 +3,7 @@ package resinquality
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -125,9 +126,28 @@ func (g *Guard) RecordStreamWatch(verdict StreamWatchVerdict, retried bool) {
 }
 
 // RecordStreamRetryOutcome notes whether the post-reshuffle retry recovered.
-func (g *Guard) RecordStreamRetryOutcome(healthy bool) {
+func (g *Guard) RecordStreamRetryOutcome(healthy bool, meta StreamDegradedMeta) {
 	if g == nil {
 		return
+	}
+	outcome := "failed"
+	if healthy {
+		outcome = "healthy"
+	}
+	g.log.Info("stream_degraded_retry_outcome",
+		"outcome", outcome,
+		"request_id", meta.RequestID,
+		"account_id", meta.AccountID,
+		"account_name", meta.AccountName,
+		"model", meta.Model,
+		"protocol", meta.Protocol,
+		"reason", meta.Reason,
+		"first_signal", meta.FirstSignal,
+		"peek_ms", meta.PeekMS,
+	)
+	eventName := "stream_retry_failed"
+	if healthy {
+		eventName = "stream_retry_healthy"
 	}
 	g.store.update(func(st *State) {
 		if healthy {
@@ -135,19 +155,54 @@ func (g *Guard) RecordStreamRetryOutcome(healthy bool) {
 		} else {
 			st.bump("stream", "retryFailed", 1)
 		}
+		st.appendEvent(Event{
+			TS: float64(time.Now().Unix()), Event: eventName,
+			Reason: meta.Reason, Classification: ClassHard, Source: "stream_watch",
+			AuditID: meta.RequestID,
+		})
 	})
 }
 
+// StreamDegradedMeta carries request-scoped diagnostics for stream-watch logs/events.
+type StreamDegradedMeta struct {
+	RequestID   string
+	AccountID   uint64
+	AccountName string
+	Model       string
+	Protocol    string
+	FirstSignal string
+	Reason      string
+	PeekMS      int64
+}
+
 // HandleStreamDegraded clears the Resin pool after a content-without-thinking hit.
-func (g *Guard) HandleStreamDegraded(ctx context.Context, reason string) (ActionResult, error) {
+func (g *Guard) HandleStreamDegraded(ctx context.Context, meta StreamDegradedMeta) (ActionResult, error) {
 	if g == nil || !g.cfg.CanRun() {
 		return ActionResult{}, errDisabled
 	}
+	reason := strings.TrimSpace(meta.Reason)
 	if reason == "" {
 		reason = "content_without_thinking"
 	}
-	g.log.Warn("stream_degraded_reshuffle", "reason", reason)
 	result, err := g.executePoolAction(ctx, reason, nil)
+	cleared := result.Cleared
+	logArgs := []any{
+		"reason", reason,
+		"request_id", meta.RequestID,
+		"account_id", meta.AccountID,
+		"account_name", meta.AccountName,
+		"model", meta.Model,
+		"protocol", meta.Protocol,
+		"first_signal", meta.FirstSignal,
+		"peek_ms", meta.PeekMS,
+		"cleared", cleared,
+	}
+	if err != nil {
+		logArgs = append(logArgs, "error", err.Error())
+		g.log.Warn("stream_degraded_reshuffle", logArgs...)
+	} else {
+		g.log.Warn("stream_degraded_reshuffle", logArgs...)
+	}
 	g.store.update(func(st *State) {
 		st.bump("stream", "reshuffles", 1)
 		st.Pool.LastReason = reason
@@ -158,7 +213,9 @@ func (g *Guard) HandleStreamDegraded(ctx context.Context, reason string) (Action
 		}
 		st.appendEvent(Event{
 			TS: float64(time.Now().Unix()), Event: "stream_pool_reshuffled",
-			Reason: reason, Classification: ClassHard, Cleared: result.Cleared, Source: "stream_watch",
+			Reason: reason, Classification: ClassHard, Cleared: cleared, Source: "stream_watch",
+			// Reuse AuditID/Tokens fields lightly for request correlation in the admin event feed.
+			AuditID: meta.RequestID,
 		})
 	})
 	return result, err

@@ -1038,13 +1038,23 @@ func (h *Handler) writeResultWithRetry(c *gin.Context, result *gateway.Result, s
 	_ = result.Body.Close()
 	result.Finalize(gateway.Usage{}, "", "stream_degraded_content_without_thinking")
 
-	if _, reshuffleErr := h.resinQuality.HandleStreamDegraded(c.Request.Context(), verdict.Reason); reshuffleErr != nil {
+	meta := resinqualityapp.StreamDegradedMeta{
+		RequestID:   strings.TrimSpace(c.GetString(middleware.RequestIDKey)),
+		AccountID:   result.AccountID,
+		AccountName: result.AccountName,
+		Model:       result.Model,
+		Protocol:    watchProtocol,
+		FirstSignal: verdict.FirstSignal,
+		Reason:      verdict.Reason,
+		PeekMS:      verdict.PeekMS,
+	}
+	if _, reshuffleErr := h.resinQuality.HandleStreamDegraded(c.Request.Context(), meta); reshuffleErr != nil {
 		// Still attempt retry; reshuffle failure is logged inside the guard.
 	}
 
 	retryResult, retryErr := retry(c.Request.Context())
 	if retryErr != nil {
-		h.resinQuality.RecordStreamRetryOutcome(false)
+		h.resinQuality.RecordStreamRetryOutcome(false, meta)
 		if anthropic {
 			writeGatewayAnthropicError(c, retryErr)
 		} else {
@@ -1056,7 +1066,7 @@ func (h *Handler) writeResultWithRetry(c *gin.Context, result *gateway.Result, s
 	// Second attempt: do NOT preflight again (one transparent retry only).
 	// Still record whether the retry itself looks healthy if we can cheaply peek —
 	// but to keep latency low and avoid double-buffering, just forward.
-	h.resinQuality.RecordStreamRetryOutcome(true)
+	h.resinQuality.RecordStreamRetryOutcome(true, meta)
 	h.writeProtocolResult(c, retryResult, stream, anthropic, protocol)
 }
 
