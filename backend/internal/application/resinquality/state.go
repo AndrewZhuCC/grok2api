@@ -135,6 +135,18 @@ func (s *stateStore) ensureMaps() {
 	if s.cur.Statistics.Stream == nil {
 		s.cur.Statistics.Stream = map[string]int{}
 	}
+	// Ensure stream ledger keys always exist so UI never falls back to legacy actions.*.
+	for _, key := range []string{"total", "healthy", "degraded", "retried", "retryHealthy", "retryFailed", "reshuffles"} {
+		if _, ok := s.cur.Statistics.Stream[key]; !ok {
+			s.cur.Statistics.Stream[key] = 0
+		}
+	}
+	// Heal older builds that only counted thinking as healthy (total > healthy+degraded).
+	stream := s.cur.Statistics.Stream
+	accounted := stream["healthy"] + stream["degraded"]
+	if stream["total"] > accounted {
+		stream["healthy"] += stream["total"] - accounted
+	}
 	if s.cur.Pool.SuspectExitIPs == nil {
 		s.cur.Pool.SuspectExitIPs = []string{}
 	}

@@ -315,7 +315,8 @@ function ResinStreamPanel({
         </div>
         <div className="p-4">
           <p className="text-xs text-muted-foreground">{t("qualityGuard.resinReshuffles")}</p>
-          <p className="mt-1 text-lg font-medium tabular-nums">{stream.reshuffles ?? resin.state?.statistics?.actions?.reshuffles ?? 0}</p>
+          {/* Only stream-watch reshuffles — never fall back to legacy actions.reshuffles. */}
+          <p className="mt-1 text-lg font-medium tabular-nums">{stream.reshuffles ?? 0}</p>
           <p className="mt-1 text-[11px] text-muted-foreground">
             retry ok {stream.retryHealthy ?? 0} / fail {stream.retryFailed ?? 0}
           </p>

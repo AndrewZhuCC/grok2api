@@ -91,6 +91,11 @@ func (g *Guard) GetStatus(ctx context.Context) Status {
 }
 
 // RecordStreamWatch stores a preflight verdict and bumps stream stats.
+//
+// Accounting invariant: total == healthy + degraded.
+// - degraded: content without prior thinking (interrupt + reshuffle + retry)
+// - healthy: everything else that was preflighted without triggering interrupt
+//   (thinking present, timeout/EOF pass-through, tool-only, etc.)
 func (g *Guard) RecordStreamWatch(verdict StreamWatchVerdict, retried bool) {
 	if g == nil {
 		return
@@ -108,7 +113,9 @@ func (g *Guard) RecordStreamWatch(verdict StreamWatchVerdict, retried bool) {
 				TS: now, Event: "stream_degraded", Reason: verdict.Reason,
 				Classification: ClassHard, Source: "stream_watch",
 			})
-		} else if verdict.FirstSignal == SignalThinking || verdict.Reason == "thinking_present" {
+		} else {
+			// Non-degraded preflight always counts as healthy for the stream-watch
+			// ledger (including pass-through on timeout/EOF). Thinking is the common case.
 			st.bump("stream", "healthy", 1)
 		}
 		if retried {
