@@ -33,8 +33,13 @@ type Config struct {
 	// ZeroReasoningSoft treats successful build stream samples with reasoningTokens==0
 	// as soft degradation, OR-combined with TPS classification.
 	ZeroReasoningSoft bool
-	RequestTimeout    time.Duration
-	StateFile         string
+	// StreamWatchEnabled peeks streaming Build replies: content without prior thinking
+	// is treated as degraded → clear Resin pool and allow one transparent retry.
+	StreamWatchEnabled bool
+	// StreamWatchTimeout bounds how long preflight waits for the first semantic signal.
+	StreamWatchTimeout time.Duration
+	RequestTimeout     time.Duration
+	StateFile          string
 
 	// Optional: use local gateway base for model probe.
 	// Prefer in-process ClientKey List/Reveal (like creative console) over env secret.
@@ -68,14 +73,16 @@ func LoadConfigFromEnv() Config {
 		Jitter:            time.Duration(envInt("RESIN_QUALITY_GUARD_JITTER_SECONDS", 30)) * time.Second,
 		FailClosed:        envBool("RESIN_QUALITY_GUARD_FAIL_CLOSED", false),
 		// Default on: live grok-4.5 degraded exits often show reasoningTokens=0.
-		ZeroReasoningSoft: envBool("RESIN_QUALITY_GUARD_ZERO_REASONING_SOFT", true),
-		RequestTimeout:    time.Duration(envInt("RESIN_QUALITY_GUARD_REQUEST_TIMEOUT_SECONDS", 60)) * time.Second,
-		StateFile:         envStr("RESIN_QUALITY_GUARD_STATE_FILE", "/app/data/resin-quality-guard-state.json"),
-		ProbeBaseURL:      strings.TrimRight(envStr("RESIN_QUALITY_GUARD_PROBE_BASE_URL", ""), "/"),
-		ProbeAPIKey:       envStr("RESIN_QUALITY_GUARD_PROBE_API_KEY", ""),
-		ProbeKeyID:        uint64(envInt("RESIN_QUALITY_GUARD_PROBE_KEY_ID", 0)),
-		ProbeModel:        envStr("RESIN_QUALITY_GUARD_PROBE_MODEL", "grok-4.5"),
-		ProbeMaxTokens:    envInt("RESIN_QUALITY_GUARD_PROBE_MAX_TOKENS", 256),
+		ZeroReasoningSoft:  envBool("RESIN_QUALITY_GUARD_ZERO_REASONING_SOFT", true),
+		StreamWatchEnabled: envBool("RESIN_QUALITY_GUARD_STREAM_WATCH", true),
+		StreamWatchTimeout: time.Duration(envInt("RESIN_QUALITY_GUARD_STREAM_WATCH_TIMEOUT_SECONDS", 45)) * time.Second,
+		RequestTimeout:     time.Duration(envInt("RESIN_QUALITY_GUARD_REQUEST_TIMEOUT_SECONDS", 60)) * time.Second,
+		StateFile:          envStr("RESIN_QUALITY_GUARD_STATE_FILE", "/app/data/resin-quality-guard-state.json"),
+		ProbeBaseURL:       strings.TrimRight(envStr("RESIN_QUALITY_GUARD_PROBE_BASE_URL", ""), "/"),
+		ProbeAPIKey:        envStr("RESIN_QUALITY_GUARD_PROBE_API_KEY", ""),
+		ProbeKeyID:         uint64(envInt("RESIN_QUALITY_GUARD_PROBE_KEY_ID", 0)),
+		ProbeModel:         envStr("RESIN_QUALITY_GUARD_PROBE_MODEL", "grok-4.5"),
+		ProbeMaxTokens:     envInt("RESIN_QUALITY_GUARD_PROBE_MAX_TOKENS", 256),
 	}
 	if cfg.Mode != "passive" && cfg.Mode != "active" && cfg.Mode != "hybrid" {
 		cfg.Mode = "hybrid"

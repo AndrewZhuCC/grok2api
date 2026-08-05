@@ -71,43 +71,126 @@ type Status struct {
 
 // PublicCfg is safe config for UI (no tokens).
 type PublicCfg struct {
-	Mode              string  `json:"mode"`
-	ActionMode        string  `json:"actionMode"`
-	SoftTPS           float64 `json:"softTps"`
-	HardTPS           float64 `json:"hardTps"`
-	ConsecutiveSoft   int     `json:"consecutiveSoft"`
-	ConsecutiveErrors int     `json:"consecutiveErrors"`
-	QuarantineSeconds int     `json:"quarantineSeconds"`
-	ActiveIntervalSec int     `json:"activeIntervalSeconds"`
-	PassivePollSec    int     `json:"passivePollSeconds"`
-	FailClosed        bool    `json:"failClosed"`
-	ZeroReasoningSoft bool    `json:"zeroReasoningSoft"`
-	PlatformID        string  `json:"platformId"`
-	CanProbe          bool    `json:"canProbe"`
-	HasProxyURL       bool    `json:"hasProxyUrl"`
-	ProbeModel        string  `json:"probeModel"`
-	AutoSelectKey     bool    `json:"autoSelectKey"`
+	Mode               string  `json:"mode"`
+	ActionMode         string  `json:"actionMode"`
+	SoftTPS            float64 `json:"softTps"`
+	HardTPS            float64 `json:"hardTps"`
+	ConsecutiveSoft    int     `json:"consecutiveSoft"`
+	ConsecutiveErrors  int     `json:"consecutiveErrors"`
+	QuarantineSeconds  int     `json:"quarantineSeconds"`
+	ActiveIntervalSec  int     `json:"activeIntervalSeconds"`
+	PassivePollSec     int     `json:"passivePollSeconds"`
+	FailClosed         bool    `json:"failClosed"`
+	ZeroReasoningSoft  bool    `json:"zeroReasoningSoft"`
+	StreamWatchEnabled bool    `json:"streamWatchEnabled"`
+	PlatformID         string  `json:"platformId"`
+	CanProbe           bool    `json:"canProbe"`
+	HasProxyURL        bool    `json:"hasProxyUrl"`
+	ProbeModel         string  `json:"probeModel"`
+	AutoSelectKey      bool    `json:"autoSelectKey"`
 }
 
 func (g *Guard) publicCfg() PublicCfg {
 	return PublicCfg{
-		Mode:              g.cfg.Mode,
-		ActionMode:        g.cfg.ActionMode,
-		SoftTPS:           g.cfg.SoftTPS,
-		HardTPS:           g.cfg.HardTPS,
-		ConsecutiveSoft:   g.cfg.ConsecutiveSoft,
-		ConsecutiveErrors: g.cfg.ConsecutiveErrors,
-		QuarantineSeconds: int(g.cfg.Quarantine.Seconds()),
-		ActiveIntervalSec: int(g.cfg.ActiveInterval.Seconds()),
-		PassivePollSec:    int(g.cfg.PassivePoll.Seconds()),
-		FailClosed:        g.cfg.FailClosed,
-		ZeroReasoningSoft: g.cfg.ZeroReasoningSoft,
-		PlatformID:        g.cfg.PlatformID,
-		CanProbe:          g.canProbe(),
-		HasProxyURL:       g.cfg.ResinProxyURL != "",
-		ProbeModel:        g.cfg.ProbeModel,
-		AutoSelectKey:     g.cfg.ProbeAPIKey == "" && g.clientKeys != nil,
+		Mode:               g.cfg.Mode,
+		ActionMode:         g.cfg.ActionMode,
+		SoftTPS:            g.cfg.SoftTPS,
+		HardTPS:            g.cfg.HardTPS,
+		ConsecutiveSoft:    g.cfg.ConsecutiveSoft,
+		ConsecutiveErrors:  g.cfg.ConsecutiveErrors,
+		QuarantineSeconds:  int(g.cfg.Quarantine.Seconds()),
+		ActiveIntervalSec:  int(g.cfg.ActiveInterval.Seconds()),
+		PassivePollSec:     int(g.cfg.PassivePoll.Seconds()),
+		FailClosed:         g.cfg.FailClosed,
+		ZeroReasoningSoft:  g.cfg.ZeroReasoningSoft,
+		StreamWatchEnabled: g.cfg.StreamWatchEnabled,
+		PlatformID:         g.cfg.PlatformID,
+		CanProbe:           g.canProbe(),
+		HasProxyURL:        g.cfg.ResinProxyURL != "",
+		ProbeModel:         g.cfg.ProbeModel,
+		AutoSelectKey:      g.cfg.ProbeAPIKey == "" && g.clientKeys != nil,
 	}
+}
+
+// StreamWatchEnabled reports whether live stream first-signal watching is on.
+func (g *Guard) StreamWatchEnabled() bool {
+	return g != nil && g.cfg.CanRun() && g.cfg.StreamWatchEnabled
+}
+
+// StreamWatchTimeout is the preflight wait bound.
+func (g *Guard) StreamWatchTimeout() time.Duration {
+	if g == nil || g.cfg.StreamWatchTimeout <= 0 {
+		return 45 * time.Second
+	}
+	return g.cfg.StreamWatchTimeout
+}
+
+// RecordStreamWatch stores a preflight verdict and bumps stream stats.
+func (g *Guard) RecordStreamWatch(verdict StreamWatchVerdict, retried bool) {
+	if g == nil {
+		return
+	}
+	now := float64(time.Now().Unix())
+	g.store.update(func(st *State) {
+		st.bump("stream", "total", 1)
+		st.LastStreamSignal = verdict.FirstSignal
+		st.LastStreamReason = verdict.Reason
+		st.LastStreamAt = now
+		st.LastStreamDegraded = verdict.Degraded
+		if verdict.Degraded {
+			st.bump("stream", "degraded", 1)
+			st.appendEvent(Event{
+				TS: now, Event: "stream_degraded", Reason: verdict.Reason,
+				Classification: ClassHard, Source: "stream_watch",
+			})
+		} else if verdict.FirstSignal == SignalThinking || verdict.Reason == "thinking_present" {
+			st.bump("stream", "healthy", 1)
+		}
+		if retried {
+			st.bump("stream", "retried", 1)
+		}
+	})
+}
+
+// RecordStreamRetryOutcome notes whether the post-reshuffle retry recovered.
+func (g *Guard) RecordStreamRetryOutcome(healthy bool) {
+	if g == nil {
+		return
+	}
+	g.store.update(func(st *State) {
+		if healthy {
+			st.bump("stream", "retryHealthy", 1)
+		} else {
+			st.bump("stream", "retryFailed", 1)
+		}
+	})
+}
+
+// HandleStreamDegraded clears the Resin pool after a content-without-thinking hit.
+// It is safe to call concurrently; returns the reshuffle result for logging.
+func (g *Guard) HandleStreamDegraded(ctx context.Context, reason string) (ActionResult, error) {
+	if g == nil || !g.cfg.CanRun() {
+		return ActionResult{}, errDisabled
+	}
+	if reason == "" {
+		reason = "content_without_thinking"
+	}
+	g.log.Warn("stream_degraded_reshuffle", "reason", reason)
+	result, err := g.executePoolAction(ctx, reason, nil)
+	g.store.update(func(st *State) {
+		st.bump("stream", "reshuffles", 1)
+		st.Pool.LastReason = reason
+		st.Pool.LastClassification = ClassHard
+		st.Pool.LastObservedAt = float64(time.Now().Unix())
+		if err == nil {
+			st.Pool.LastAction = actionToMap(result)
+		}
+		st.appendEvent(Event{
+			TS: float64(time.Now().Unix()), Event: "stream_pool_reshuffled",
+			Reason: reason, Classification: ClassHard, Cleared: result.Cleared, Source: "stream_watch",
+		})
+	})
+	return result, err
 }
 
 func (g *Guard) canProbe() bool {

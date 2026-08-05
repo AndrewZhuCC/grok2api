@@ -29,6 +29,8 @@ type Stats struct {
 	Passive map[string]int `json:"passive"`
 	Active  map[string]int `json:"active"`
 	Actions map[string]int `json:"actions"`
+	// Stream is live first-signal watch (content without thinking → interrupt/retry).
+	Stream map[string]int `json:"stream"`
 }
 
 // Event is a recent guard event for the admin UI.
@@ -77,6 +79,10 @@ type State struct {
 	LastPassiveClass    string       `json:"lastPassiveClass,omitempty"`
 	LastPassiveAuditID  string       `json:"lastPassiveAuditId,omitempty"`
 	RecentSoftSamples   []SoftSample `json:"recentSoftSamples,omitempty"`
+	LastStreamSignal    string       `json:"lastStreamSignal,omitempty"`
+	LastStreamReason    string       `json:"lastStreamReason,omitempty"`
+	LastStreamAt        float64      `json:"lastStreamAt,omitempty"`
+	LastStreamDegraded  bool         `json:"lastStreamDegraded,omitempty"`
 }
 
 func defaultState() State {
@@ -88,6 +94,7 @@ func defaultState() State {
 			Passive: map[string]int{"total": 0, "healthy": 0, "soft": 0, "hard": 0, "ignored": 0},
 			Active:  map[string]int{"total": 0, "healthy": 0, "soft": 0, "hard": 0, "error": 0},
 			Actions: map[string]int{"quarantined": 0, "restored": 0, "reshuffles": 0, "targetedClears": 0},
+			Stream:  map[string]int{"total": 0, "healthy": 0, "degraded": 0, "retried": 0, "retryHealthy": 0, "retryFailed": 0, "reshuffles": 0},
 		},
 		Events:    []Event{},
 		StartedAt: now,
@@ -125,6 +132,9 @@ func (s *stateStore) ensureMaps() {
 	if s.cur.Statistics.Actions == nil {
 		s.cur.Statistics.Actions = map[string]int{}
 	}
+	if s.cur.Statistics.Stream == nil {
+		s.cur.Statistics.Stream = map[string]int{}
+	}
 	if s.cur.Pool.SuspectExitIPs == nil {
 		s.cur.Pool.SuspectExitIPs = []string{}
 	}
@@ -147,6 +157,7 @@ func (s *stateStore) snapshot() State {
 	out.Statistics.Passive = copyIntMap(s.cur.Statistics.Passive)
 	out.Statistics.Active = copyIntMap(s.cur.Statistics.Active)
 	out.Statistics.Actions = copyIntMap(s.cur.Statistics.Actions)
+	out.Statistics.Stream = copyIntMap(s.cur.Statistics.Stream)
 	if s.cur.Pool.LastAction != nil {
 		out.Pool.LastAction = copyAnyMap(s.cur.Pool.LastAction)
 	}
@@ -198,6 +209,11 @@ func (st *State) bump(group, field string, n int) {
 			st.Statistics.Actions = map[string]int{}
 		}
 		m = st.Statistics.Actions
+	case "stream":
+		if st.Statistics.Stream == nil {
+			st.Statistics.Stream = map[string]int{}
+		}
+		m = st.Statistics.Stream
 	default:
 		return
 	}

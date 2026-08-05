@@ -2,6 +2,7 @@ package inference
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/application/gateway"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
+	resinqualityapp "github.com/chenyme/grok2api/backend/internal/application/resinquality"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
@@ -32,6 +34,9 @@ type Handler struct {
 	maxBodyBytes     int64
 	publicAPIBaseURL string
 	publicBaseURL    func() string
+	// resinQuality is optional; when set, streaming Build replies are preflighted for
+	// content-without-thinking degradation (clear Resin pool + one transparent retry).
+	resinQuality *resinqualityapp.Guard
 }
 
 const (
@@ -76,6 +81,12 @@ func NewHandler(gatewayService *gateway.Service, models *modelapp.Service, maxBo
 // Set it before Register; request handling only reads the resolver.
 func (h *Handler) SetPublicAPIBaseURLResolver(resolve func() string) *Handler {
 	h.publicBaseURL = resolve
+	return h
+}
+
+// SetResinQualityGuard attaches the in-process Resin stream-watch / reshuffle guard.
+func (h *Handler) SetResinQualityGuard(guard *resinqualityapp.Guard) *Handler {
+	h.resinQuality = guard
 	return h
 }
 
@@ -296,18 +307,21 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
-	result, err := h.gateway.CreateChatCompletion(c.Request.Context(), gateway.Input{
+	input := gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
 		PromptCacheSeed:           extractPromptCacheSeed(c.Request.Header, body),
 		AllowClientToolCacheRoute: allowBuildClientToolCacheRoute(c.Request.Header),
 		GrokTurnIndex:             c.GetHeader("x-grok-turn-idx"),
-	})
+	}
+	result, err := h.gateway.CreateChatCompletion(c.Request.Context(), input)
 	if err != nil {
 		writeGatewayError(c, err)
 		return
 	}
-	h.writeResult(c, result, request.Stream, streamProtocolChat)
+	h.writeResultWithRetry(c, result, request.Stream, false, streamProtocolChat, func(ctx context.Context) (*gateway.Result, error) {
+		return h.gateway.CreateChatCompletion(ctx, input)
+	})
 }
 
 func (h *Handler) createMessage(c *gin.Context) {
@@ -338,18 +352,21 @@ func (h *Handler) createMessage(c *gin.Context) {
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
-	result, err := h.gateway.CreateMessage(c.Request.Context(), gateway.Input{
+	input := gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
 		PromptCacheSeed:           extractPromptCacheSeed(c.Request.Header, body),
 		AllowClientToolCacheRoute: allowBuildClientToolCacheRoute(c.Request.Header),
 		GrokTurnIndex:             c.GetHeader("x-grok-turn-idx"),
-	})
+	}
+	result, err := h.gateway.CreateMessage(c.Request.Context(), input)
 	if err != nil {
 		writeGatewayAnthropicError(c, err)
 		return
 	}
-	h.writeAnthropicResult(c, result, request.Stream)
+	h.writeResultWithRetry(c, result, request.Stream, true, streamProtocolAnthropic, func(ctx context.Context) (*gateway.Result, error) {
+		return h.gateway.CreateMessage(ctx, input)
+	})
 }
 
 func (h *Handler) generateImage(c *gin.Context) {
@@ -902,7 +919,14 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 		writeGatewayError(c, err)
 		return
 	}
-	h.writeResult(c, result, request.Stream && !compact, streamProtocolResponses)
+	stream := request.Stream && !compact
+	if stream && !compact {
+		h.writeResultWithRetry(c, result, true, false, streamProtocolResponses, func(ctx context.Context) (*gateway.Result, error) {
+			return h.gateway.CreateResponse(ctx, input)
+		})
+		return
+	}
+	h.writeResult(c, result, stream, streamProtocolResponses)
 }
 
 func isJSONRequest(c *gin.Context) bool {
@@ -967,6 +991,86 @@ func (h *Handler) writeResult(c *gin.Context, result *gateway.Result, stream boo
 
 func (h *Handler) writeAnthropicResult(c *gin.Context, result *gateway.Result, stream bool) {
 	h.writeProtocolResult(c, result, stream, true, streamProtocolAnthropic)
+}
+
+// writeResultWithRetry is like writeProtocolResult, but for streaming Build replies it
+// peeks the first semantic signal. Content without prior thinking triggers Resin pool
+// clear + exactly one transparent re-request before any bytes reach the client.
+func (h *Handler) writeResultWithRetry(c *gin.Context, result *gateway.Result, stream, anthropic bool, protocol streamProtocol, retry func(context.Context) (*gateway.Result, error)) {
+	if !stream || retry == nil || h.resinQuality == nil || !h.resinQuality.StreamWatchEnabled() {
+		h.writeProtocolResult(c, result, stream, anthropic, protocol)
+		return
+	}
+	if result.StatusCode < 200 || result.StatusCode >= 300 {
+		h.writeProtocolResult(c, result, stream, anthropic, protocol)
+		return
+	}
+	// Only Grok Build is expected to always think first; skip other providers.
+	if result.Provider != string(account.ProviderBuild) {
+		h.writeProtocolResult(c, result, stream, anthropic, protocol)
+		return
+	}
+
+	watchProtocol := streamWatchProtocol(protocol)
+	verdict, preflightErr := resinqualityapp.PreflightStream(result.Body, watchProtocol, h.resinQuality.StreamWatchTimeout())
+	if preflightErr != nil {
+		// Treat preflight I/O errors as a normal stream failure path.
+		_ = result.Body.Close()
+		result.Finalize(gateway.Usage{}, "", "upstream_stream_interrupted")
+		if anthropic {
+			writeAnthropicError(c, http.StatusBadGateway, "api_error", "upstream stream interrupted")
+		} else {
+			writeOpenAIError(c, http.StatusBadGateway, "upstream_stream_interrupted", "读取上游流失败")
+		}
+		return
+	}
+
+	if !verdict.Degraded {
+		h.resinQuality.RecordStreamWatch(verdict, false)
+		// Replay buffered preflight bytes, then continue the live body.
+		result.Body = resinqualityapp.NewReplayBody(verdict.Buffered, result.Body)
+		h.writeProtocolResult(c, result, stream, anthropic, protocol)
+		return
+	}
+
+	// Degraded: discard first attempt, reshuffle Resin, retry once.
+	h.resinQuality.RecordStreamWatch(verdict, true)
+	_ = result.Body.Close()
+	result.Finalize(gateway.Usage{}, "", "stream_degraded_content_without_thinking")
+
+	if _, reshuffleErr := h.resinQuality.HandleStreamDegraded(c.Request.Context(), verdict.Reason); reshuffleErr != nil {
+		// Still attempt retry; reshuffle failure is logged inside the guard.
+	}
+
+	retryResult, retryErr := retry(c.Request.Context())
+	if retryErr != nil {
+		h.resinQuality.RecordStreamRetryOutcome(false)
+		if anthropic {
+			writeGatewayAnthropicError(c, retryErr)
+		} else {
+			writeGatewayError(c, retryErr)
+		}
+		return
+	}
+
+	// Second attempt: do NOT preflight again (one transparent retry only).
+	// Still record whether the retry itself looks healthy if we can cheaply peek —
+	// but to keep latency low and avoid double-buffering, just forward.
+	h.resinQuality.RecordStreamRetryOutcome(true)
+	h.writeProtocolResult(c, retryResult, stream, anthropic, protocol)
+}
+
+func streamWatchProtocol(protocol streamProtocol) string {
+	switch protocol {
+	case streamProtocolChat:
+		return resinqualityapp.StreamProtocolChat
+	case streamProtocolAnthropic:
+		return resinqualityapp.StreamProtocolAnthropic
+	case streamProtocolResponses:
+		return resinqualityapp.StreamProtocolResponses
+	default:
+		return resinqualityapp.StreamProtocolChat
+	}
 }
 
 func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, stream, anthropic bool, protocol streamProtocol) {

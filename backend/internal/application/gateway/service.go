@@ -119,10 +119,13 @@ type Usage struct {
 }
 
 type Result struct {
-	StatusCode          int
-	Status              string
-	Header              http.Header
-	Body                io.ReadCloser
+	StatusCode int
+	Status     string
+	Header     http.Header
+	Body       io.ReadCloser
+	// Provider is the upstream provider that produced this result (e.g. grok_build).
+	// Empty for non-generation paths.
+	Provider            string
 	MarkFirstToken      func()
 	RecordStreamFailure func(StreamFailureDiagnostic)
 	Finalize            func(usage Usage, responseID, errorCode string)
@@ -1358,7 +1361,7 @@ attemptLoop:
 			markFirstToken = firstToken.mark
 		}
 		timingHandedOff = true
-		return &Result{StatusCode: response.StatusCode, Status: response.Status, Header: response.Header, Body: &finalizingBody{ReadCloser: response.Body, finalize: func() { finalize(Usage{}, "", "stream_closed") }}, MarkFirstToken: markFirstToken, RecordStreamFailure: recordStreamFailure, Finalize: finalize}, nil
+		return &Result{StatusCode: response.StatusCode, Status: response.Status, Header: response.Header, Body: &finalizingBody{ReadCloser: response.Body, finalize: func() { finalize(Usage{}, "", "stream_closed") }}, Provider: string(route.Provider), MarkFirstToken: markFirstToken, RecordStreamFailure: recordStreamFailure, Finalize: finalize}, nil
 	}
 	if lastFailure != nil {
 		record := auditBase
@@ -1630,7 +1633,7 @@ func (s *Service) forwardOwnedResponse(ctx context.Context, input ResourceInput,
 	var once sync.Once
 	release := func() { once.Do(lease.Release) }
 	finalize := func(Usage, string, string) { release() }
-	return &Result{StatusCode: response.StatusCode, Status: response.Status, Header: response.Header, Body: &finalizingBody{ReadCloser: response.Body, finalize: release}, Finalize: finalize}, nil
+	return &Result{StatusCode: response.StatusCode, Status: response.Status, Header: response.Header, Body: &finalizingBody{ReadCloser: response.Body, finalize: release}, Provider: string(credential.Provider), Finalize: finalize}, nil
 }
 
 // markPermanentlyUnrefreshableCredentialRejected removes an account from the pool after a real upstream request confirms its access token is invalid.

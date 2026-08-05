@@ -48,7 +48,7 @@ type Dependencies struct {
 	PublicAPIBaseURL   string
 	FrontendStaticPath string
 	// Readiness 返回可观测的分层就绪状态。Ready 仅为旧调用方保留。
-Readiness              func(context.Context) ReadinessSnapshot
+	Readiness              func(context.Context) ReadinessSnapshot
 	Ready                  func(context.Context) bool
 	TrafficReady           func() bool
 	AdminAuth              *adminauthapp.Service
@@ -156,7 +156,7 @@ func New(deps Dependencies) *gin.Engine {
 	dashboardhttp.NewHandler(deps.Dashboard).Register(adminProtected)
 	mediaHandler.RegisterAdmin(adminProtected)
 	settingshttp.NewHandler(deps.Settings).Register(adminProtected)
-egressHandler := egresshttp.NewHandler(deps.Egress, deps.QualityGuardStatePath, deps.QualityGuardConfigPath).WithQualityGuardProbe(deps.QualityGuardProbe)
+	egressHandler := egresshttp.NewHandler(deps.Egress, deps.QualityGuardStatePath, deps.QualityGuardConfigPath).WithQualityGuardProbe(deps.QualityGuardProbe)
 	egressHandler.Register(adminProtected)
 	resinqualityhttp.NewHandler(deps.ResinQualityGuard).Register(adminProtected)
 	systemhttp.NewHandler(func() string {
@@ -191,6 +191,9 @@ egressHandler := egresshttp.NewHandler(deps.Egress, deps.QualityGuardStatePath, 
 	inferenceHandler := inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes, deps.PublicAPIBaseURL)
 	if deps.Settings != nil {
 		inferenceHandler.SetPublicAPIBaseURLResolver(deps.Settings.PublicAPIBaseURL)
+	}
+	if deps.ResinQualityGuard != nil {
+		inferenceHandler.SetResinQualityGuard(deps.ResinQualityGuard)
 	}
 	inferenceHandler.Register(v1)
 	registerFrontend(router, deps.FrontendStaticPath)
