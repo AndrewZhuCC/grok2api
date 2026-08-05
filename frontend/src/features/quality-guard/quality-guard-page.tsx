@@ -177,6 +177,14 @@ export function QualityGuardPage() {
         )}
       />
 
+      {/* Resin stream-watch is independent of the official sidecar; always show it. */}
+      <ResinStreamPanel
+        resin={resin}
+        locale={i18n.language}
+        reshuffling={resinReshuffleMutation.isPending}
+        onReshuffle={() => resinReshuffleMutation.mutate()}
+      />
+
       {!status?.available ? <UnavailableState /> : (
         <>
           <section className="grid overflow-hidden rounded-lg bg-card sm:grid-cols-2 xl:grid-cols-4" aria-label={t("qualityGuard.overview")}>
@@ -187,13 +195,6 @@ export function QualityGuardPage() {
           </section>
 
           {status.statistics ? <StatisticsPanel statistics={status.statistics} locale={i18n.language} /> : null}
-
-          <ResinStreamPanel
-            resin={resin}
-            locale={i18n.language}
-            reshuffling={resinReshuffleMutation.isPending}
-            onReshuffle={() => resinReshuffleMutation.mutate()}
-          />
 
           <section className="overflow-hidden rounded-lg bg-card" aria-labelledby="guard-nodes-title">
             <div className="flex flex-col gap-2 border-b px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
@@ -579,7 +580,14 @@ function policyFromStatus(status: QualityGuardStatus): QualityGuardPolicy {
 
 function UnavailableState() {
   const { t } = useTranslation();
-  return <div className="flex min-h-72 flex-col items-center justify-center rounded-lg bg-card px-6 text-center"><ShieldX className="size-7 text-muted-foreground" /><h2 className="mt-4 text-sm font-medium">{t("qualityGuard.unavailable")}</h2><p className="mt-2 max-w-md text-xs leading-5 text-muted-foreground">{t("qualityGuard.unavailableHelp")}</p></div>;
+  return (
+    <div className="flex min-h-40 flex-col items-center justify-center rounded-lg border border-dashed bg-card/60 px-6 py-8 text-center">
+      <ShieldX className="size-6 text-muted-foreground" />
+      <h2 className="mt-3 text-sm font-medium">{t("qualityGuard.unavailable")}</h2>
+      <p className="mt-2 max-w-lg text-xs leading-5 text-muted-foreground">{t("qualityGuard.unavailableHelp")}</p>
+      <p className="mt-2 max-w-lg text-xs leading-5 text-muted-foreground">{t("qualityGuard.unavailableResinNote")}</p>
+    </div>
+  );
 }
 
 function isFresh(status?: QualityGuardStatus): boolean {
