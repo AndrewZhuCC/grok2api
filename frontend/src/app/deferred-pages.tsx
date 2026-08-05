@@ -14,7 +14,6 @@ const VideoGalleryPage = lazyNamed(() => import("@/features/media/video-gallery-
 const ModelsPage = lazyNamed(() => import("@/features/models/models-page"), "ModelsPage");
 const QualityGuardPage = lazyNamed(() => import("@/features/quality-guard/quality-guard-page"), "QualityGuardPage");
 const SettingsPage = lazyNamed(() => import("@/features/settings/settings-page"), "SettingsPage");
-const ResinQualityGuardPage = lazyNamed(() => import("@/features/resin-quality-guard/resin-quality-guard-page"), "ResinQualityGuardPage");
 
 function lazyNamed<T extends Record<K, ComponentType>, K extends keyof T>(loader: () => Promise<T>, exportName: K): LazyExoticComponent<T[K]> {
   return lazy(async () => ({ default: (await loader())[exportName] }));
@@ -70,10 +69,6 @@ export function DeferredApiDocsPage() {
 
 export function DeferredSettingsPage() {
   return <DeferredPage page={SettingsPage} />;
-}
-
-export function DeferredResinQualityGuardPage() {
-  return <DeferredPage page={ResinQualityGuardPage} />;
 }
 
 function PageLoadingFallback({ fullScreen = false }: { fullScreen?: boolean }) {

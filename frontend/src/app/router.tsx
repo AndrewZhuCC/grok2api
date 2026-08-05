@@ -1,7 +1,7 @@
 import { Navigate, createBrowserRouter } from "react-router-dom";
 
 import { AnonymousBoundary, AuthBoundary } from "@/app/auth-boundary";
-import { DeferredAccountsPage, DeferredApiDocsPage, DeferredAppShell, DeferredClientKeysPage, DeferredCreativeConsolePage, DeferredDashboardPage, DeferredGalleryPage, DeferredModelsPage, DeferredQualityGuardPage, DeferredRequestAuditsPage, DeferredResinQualityGuardPage, DeferredSettingsPage, DeferredVideoGalleryPage } from "@/app/deferred-pages";
+import { DeferredAccountsPage, DeferredApiDocsPage, DeferredAppShell, DeferredClientKeysPage, DeferredCreativeConsolePage, DeferredDashboardPage, DeferredGalleryPage, DeferredModelsPage, DeferredQualityGuardPage, DeferredRequestAuditsPage, DeferredSettingsPage, DeferredVideoGalleryPage } from "@/app/deferred-pages";
 import { LoginPage } from "@/features/auth/login-page";
 
 export const router = createBrowserRouter([
@@ -25,7 +25,7 @@ export const router = createBrowserRouter([
           { path: "/video-gallery", element: <DeferredVideoGalleryPage /> },
           { path: "/request-audits", element: <DeferredRequestAuditsPage /> },
 { path: "/quality-guard", element: <DeferredQualityGuardPage /> },
-          { path: "/resin-quality-guard", element: <DeferredResinQualityGuardPage /> },
+          { path: "/resin-quality-guard", element: <Navigate to="/quality-guard" replace /> },
           { path: "/docs", element: <Navigate to="/docs/chat/completions" replace /> },
           { path: "/docs/:category/:endpoint", element: <DeferredApiDocsPage /> },
           { path: "/settings", element: <DeferredSettingsPage /> },

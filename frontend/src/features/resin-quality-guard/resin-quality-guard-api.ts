@@ -2,36 +2,10 @@ import { apiRequest } from "@/shared/api/client";
 import { createObjectDecoder, createValidatedDecoder, hasShape, isArrayOf, isBoolean, isNumber, isOptional, isRecordOf, isString } from "@/shared/api/decoder";
 
 export type ResinQualityPublicCfg = {
-  mode: string;
   actionMode: string;
-  softTps: number;
-  hardTps: number;
-  consecutiveSoft: number;
-  consecutiveErrors: number;
-  quarantineSeconds: number;
-  activeIntervalSeconds: number;
-  passivePollSeconds: number;
-  failClosed: boolean;
-  zeroReasoningSoft?: boolean;
+  streamWatchEnabled?: boolean;
   platformId: string;
-  canProbe: boolean;
   hasProxyUrl: boolean;
-  probeModel?: string;
-  autoSelectKey?: boolean;
-};
-
-export type ResinQualityPoolState = {
-  softStrikes: number;
-  errorStrikes: number;
-  quarantinedUntil: number;
-  quarantineActive: boolean;
-  lastReason: string;
-  lastClassification: string;
-  lastOutputTps: number;
-  lastExitIp: string;
-  suspectExitIps: string[];
-  lastObservedAt: number;
-  lastProbeAt: number;
 };
 
 export type ResinQualityEvent = {
@@ -47,71 +21,48 @@ export type ResinQualityEvent = {
   tokens?: number;
 };
 
-export type ResinSoftSample = {
-  ts: number;
-  auditId?: string;
-  reason?: string;
-  outputTps?: number;
-  tokens?: number;
-  source?: string;
-  exitIp?: string;
-};
-
-export type ResinProbeKeyOption = {
-  id: string;
-  name: string;
-  prefix: string;
-};
-
 export type ResinQualityStatus = {
   available: boolean;
   enabled: boolean;
   config?: ResinQualityPublicCfg;
-  probeKeys?: ResinProbeKeyOption[];
-  selectedProbeKeyId?: string;
-  effectiveProbeKeyId?: string;
   state?: {
     version: number;
-    pool: ResinQualityPoolState;
+    pool: {
+      softStrikes: number;
+      errorStrikes: number;
+      quarantinedUntil: number;
+      quarantineActive: boolean;
+      lastReason: string;
+      lastClassification: string;
+      lastOutputTps: number;
+      lastExitIp: string;
+      suspectExitIps: string[];
+      lastObservedAt: number;
+      lastProbeAt: number;
+    };
     statistics: {
-      passive: Record<string, number>;
-      active: Record<string, number>;
-      actions: Record<string, number>;
+      passive?: Record<string, number>;
+      active?: Record<string, number>;
+      actions?: Record<string, number>;
+      stream?: Record<string, number>;
     };
     events: ResinQualityEvent[];
-    lastPassivePollAt: number;
-    lastActiveCycleAt: number;
     startedAt: number;
     updatedAt: number;
-    selectedProbeKeyId?: number;
-    lastPassiveSampleTs?: number;
-    lastPassiveTps?: number;
-    lastPassiveReason?: string;
-    lastPassiveClass?: string;
-    lastPassiveAuditId?: string;
-    recentSoftSamples?: ResinSoftSample[];
+    lastStreamSignal?: string;
+    lastStreamReason?: string;
+    lastStreamAt?: number;
+    lastStreamDegraded?: boolean;
   };
 };
 
 const numberRecord = isRecordOf(isNumber);
 
 const configShape = hasShape({
-  mode: isString,
   actionMode: isString,
-  softTps: isNumber,
-  hardTps: isNumber,
-  consecutiveSoft: isNumber,
-  consecutiveErrors: isNumber,
-  quarantineSeconds: isNumber,
-  activeIntervalSeconds: isNumber,
-  passivePollSeconds: isNumber,
-  failClosed: isBoolean,
-  zeroReasoningSoft: isOptional(isBoolean),
+  streamWatchEnabled: isOptional(isBoolean),
   platformId: isString,
-  canProbe: isBoolean,
   hasProxyUrl: isBoolean,
-  probeModel: isOptional(isString),
-  autoSelectKey: isOptional(isBoolean),
 });
 
 const poolShape = hasShape({
@@ -141,51 +92,28 @@ const eventShape = hasShape({
   tokens: isOptional(isNumber),
 });
 
-const softSampleShape = hasShape({
-  ts: isNumber,
-  auditId: isOptional(isString),
-  reason: isOptional(isString),
-  outputTps: isOptional(isNumber),
-  tokens: isOptional(isNumber),
-  source: isOptional(isString),
-  exitIp: isOptional(isString),
-});
-
-const probeKeyShape = hasShape({
-  id: isString,
-  name: isString,
-  prefix: isString,
-});
-
 const stateShape = hasShape({
   version: isNumber,
   pool: poolShape,
   statistics: hasShape({
-    passive: numberRecord,
-    active: numberRecord,
-    actions: numberRecord,
+    passive: isOptional(numberRecord),
+    active: isOptional(numberRecord),
+    actions: isOptional(numberRecord),
+    stream: isOptional(numberRecord),
   }),
   events: isArrayOf(eventShape),
-  lastPassivePollAt: isNumber,
-  lastActiveCycleAt: isNumber,
   startedAt: isNumber,
   updatedAt: isNumber,
-  selectedProbeKeyId: isOptional(isNumber),
-  lastPassiveSampleTs: isOptional(isNumber),
-  lastPassiveTps: isOptional(isNumber),
-  lastPassiveReason: isOptional(isString),
-  lastPassiveClass: isOptional(isString),
-  lastPassiveAuditId: isOptional(isString),
-  recentSoftSamples: isOptional(isArrayOf(softSampleShape)),
+  lastStreamSignal: isOptional(isString),
+  lastStreamReason: isOptional(isString),
+  lastStreamAt: isOptional(isNumber),
+  lastStreamDegraded: isOptional(isBoolean),
 });
 
 const statusDecoder = createObjectDecoder<ResinQualityStatus>("resin quality status", {
   available: isBoolean,
   enabled: isBoolean,
   config: isOptional(configShape),
-  probeKeys: isOptional(isArrayOf(probeKeyShape)),
-  selectedProbeKeyId: isOptional(isString),
-  effectiveProbeKeyId: isOptional(isString),
   state: isOptional(stateShape),
 });
 
@@ -195,18 +123,6 @@ export async function getResinQualityStatus(): Promise<ResinQualityStatus> {
   return apiRequest("/api/admin/v1/resin-quality-guard", { method: "GET" }, statusDecoder);
 }
 
-export async function setResinQualityProbeKey(keyId: string): Promise<ResinQualityStatus> {
-  return apiRequest(
-    "/api/admin/v1/resin-quality-guard/probe-key",
-    { method: "PUT", body: JSON.stringify({ keyId: keyId || "auto" }) },
-    statusDecoder,
-  );
-}
-
 export async function postResinQualityReshuffle(): Promise<Record<string, unknown>> {
   return apiRequest("/api/admin/v1/resin-quality-guard/reshuffle", { method: "POST" }, looseObjectDecoder);
-}
-
-export async function postResinQualityProbe(): Promise<Record<string, unknown>> {
-  return apiRequest("/api/admin/v1/resin-quality-guard/probe", { method: "POST" }, looseObjectDecoder);
 }

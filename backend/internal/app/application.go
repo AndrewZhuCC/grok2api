@@ -402,18 +402,14 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	updateService := updatecheckapp.NewService(buildinfo.CurrentVersion(), nil)
 
 	resinQualityCfg := resinqualityapp.LoadConfigFromEnv()
-	// Default probe base to this process listen address when not set (in-process client key path).
-	if resinQualityCfg.ProbeBaseURL == "" && resinQualityCfg.Enabled {
-		resinQualityCfg.ProbeBaseURL = "http://127.0.0.1" + normalizeListenForLoopback(cfg.Server.Listen)
-	}
-	// Auto-pick client keys via List/RevealSecret (same idea as creative console); no manual PROBE_API_KEY required.
-	resinQualityGuard := resinqualityapp.NewGuard(resinQualityCfg, logger, clientKeyService, auditService)
+	// Stream-watch + manual Resin clear only; official quality-guard owns passive/active node quarantine.
+	resinQualityGuard := resinqualityapp.NewGuard(resinQualityCfg, logger, nil, nil)
 
 	startup := newStartupState(len(windows))
 	readiness := func(readyCtx context.Context) httpserver.ReadinessSnapshot {
 		return readinessSnapshot(readyCtx, startup, runtimeHealth, modelRepo, accountRepo, providers, auditService)
 	}
-qualityGuardProbe := egressapp.QualityProbeInput{}
+	qualityGuardProbe := egressapp.QualityProbeInput{}
 	if cfg.QualityGuard.Enabled {
 		qualityGuardProbe = egressapp.QualityProbeInput{
 			ClientKeyID: qualityGuardIdentity.ID, Model: cfg.QualityGuard.Model,

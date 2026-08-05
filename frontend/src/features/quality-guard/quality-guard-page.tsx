@@ -1,6 +1,6 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient, type UseMutationResult } from "@tanstack/react-query";
-import { Activity, AlertTriangle, BarChart3, Bot, Coins, Eye, Gauge, MoreHorizontal, Pencil, Plus, Power, PowerOff, RefreshCw, RotateCcw, RotateCw, Shield, ShieldCheck, ShieldX, TimerReset, Trash2, Zap } from "lucide-react";
+import { Activity, AlertTriangle, BarChart3, Bot, Coins, Eye, Gauge, MoreHorizontal, Pencil, Plus, Power, PowerOff, RefreshCw, RotateCcw, RotateCw, Shield, ShieldCheck, ShieldX, Shuffle, TimerReset, Trash2, Zap } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "react-i18next";
@@ -19,6 +19,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { getQualityGuardStatus, runQualityTest, updateQualityGuardPolicy, type QualityGuardEvent, type QualityGuardNodeState, type QualityGuardPolicy, type QualityGuardStatistics, type QualityGuardStatus, type QualityTestResult } from "@/features/quality-guard/quality-guard-api";
+import { getResinQualityStatus, postResinQualityReshuffle, type ResinQualityStatus } from "@/features/resin-quality-guard/resin-quality-guard-api";
 import { createEgressNode, deleteEgressNodes, listAllEgressNodes, updateEgressNode, updateEgressNodesEnabled, type EgressNodeDTO, type EgressNodeInput } from "@/features/settings/settings-api";
 import { ErrorState } from "@/shared/components/data-state";
 import { PageHeader } from "@/shared/components/page-header";
@@ -40,10 +41,26 @@ export function QualityGuardPage() {
     queryFn: getQualityGuardStatus,
     refetchInterval: 5_000,
   });
+  const resinQuery = useQuery({
+    queryKey: ["resin-quality-guard"],
+    queryFn: getResinQualityStatus,
+    refetchInterval: 5_000,
+    retry: false,
+  });
   const nodesQuery = useQuery({
     queryKey: ["quality-guard-egress-nodes"],
     queryFn: () => listAllEgressNodes({ scope: "grok_build" }),
     refetchInterval: 15_000,
+  });
+  const resinReshuffleMutation = useMutation({
+    mutationFn: postResinQualityReshuffle,
+    onMutate: () => toast.loading(t("qualityGuard.resinReshuffling"), { id: "resin-reshuffle" }),
+    onSuccess: (data) => {
+      const cleared = typeof data.cleared === "number" ? data.cleared : 0;
+      toast.success(t("qualityGuard.resinReshuffleDone", { cleared: String(cleared) }), { id: "resin-reshuffle" });
+      void queryClient.invalidateQueries({ queryKey: ["resin-quality-guard"] });
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : t("qualityGuard.resinReshuffleFailed"), { id: "resin-reshuffle" }),
   });
   const testMutation = useMutation({
     mutationFn: ({ nodeId, status }: { nodeId: string; status: QualityGuardStatus }) => runQualityTest(nodeId, status),
@@ -125,10 +142,11 @@ export function QualityGuardPage() {
     setEditingNode(node);
   };
 
-  const refresh = () => void Promise.all([statusQuery.refetch(), nodesQuery.refetch()]);
+  const refresh = () => void Promise.all([statusQuery.refetch(), nodesQuery.refetch(), resinQuery.refetch()]);
   if (statusQuery.isError && !statusQuery.data) return <ErrorState message={statusQuery.error.message} onRetry={refresh} />;
 
   const status = statusQuery.data;
+  const resin = resinQuery.data;
   const nodes = nodesQuery.data?.items ?? [];
   const protectedNodeIDs = new Set(status?.protectedNodeIds ?? []);
   const selectableNodes = nodes.filter((node) => !protectedNodeIDs.has(node.id));
@@ -169,6 +187,13 @@ export function QualityGuardPage() {
           </section>
 
           {status.statistics ? <StatisticsPanel statistics={status.statistics} locale={i18n.language} /> : null}
+
+          <ResinStreamPanel
+            resin={resin}
+            locale={i18n.language}
+            reshuffling={resinReshuffleMutation.isPending}
+            onReshuffle={() => resinReshuffleMutation.mutate()}
+          />
 
           <section className="overflow-hidden rounded-lg bg-card" aria-labelledby="guard-nodes-title">
             <div className="flex flex-col gap-2 border-b px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
@@ -225,6 +250,77 @@ export function QualityGuardPage() {
         </>
       )}
     </div>
+  );
+}
+
+function ResinStreamPanel({
+  resin,
+  locale,
+  reshuffling,
+  onReshuffle,
+}: {
+  resin?: ResinQualityStatus;
+  locale: string;
+  reshuffling: boolean;
+  onReshuffle: () => void;
+}) {
+  const { t } = useTranslation();
+  if (!resin?.available) {
+    return (
+      <section className="overflow-hidden rounded-lg border border-dashed bg-card/50 px-4 py-4 sm:px-5" aria-labelledby="resin-stream-title">
+        <h2 id="resin-stream-title" className="text-sm font-medium">{t("qualityGuard.resinTitle")}</h2>
+        <p className="mt-1 text-xs text-muted-foreground">{t("qualityGuard.resinDisabledHint")}</p>
+      </section>
+    );
+  }
+  const stream = resin.state?.statistics?.stream ?? {};
+  const lastAt = resin.state?.lastStreamAt;
+  const degraded = Boolean(resin.state?.lastStreamDegraded);
+  return (
+    <section className="overflow-hidden rounded-lg bg-card" aria-labelledby="resin-stream-title">
+      <div className="flex flex-col gap-3 border-b px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+        <div>
+          <h2 id="resin-stream-title" className="text-sm font-medium">{t("qualityGuard.resinTitle")}</h2>
+          <p className="mt-1 text-xs text-muted-foreground">{t("qualityGuard.resinHelp")}</p>
+        </div>
+        <Button type="button" variant="destructive" size="sm" disabled={!resin.enabled || reshuffling} onClick={onReshuffle}>
+          {reshuffling ? <Spinner className="size-4" /> : <Shuffle className="size-4" />}
+          {t("qualityGuard.resinReshuffle")}
+        </Button>
+      </div>
+      <div className="grid sm:grid-cols-2 xl:grid-cols-4">
+        <div className="border-b p-4 sm:border-r xl:border-b-0">
+          <p className="text-xs text-muted-foreground">{t("qualityGuard.resinStreamWatch")}</p>
+          <p className="mt-1 text-lg font-medium">{resin.config?.streamWatchEnabled ? t("qualityGuard.running") : t("common.disabled")}</p>
+        </div>
+        <div className="border-b p-4 xl:border-b-0 xl:border-r">
+          <p className="text-xs text-muted-foreground">{t("qualityGuard.resinLastSignal")}</p>
+          <p className="mt-1 truncate text-lg font-medium">
+            {resin.state?.lastStreamReason || resin.state?.lastStreamSignal || "—"}
+            {degraded ? <Badge className="ml-2" variant="destructive">{t("qualityGuard.resinDegraded")}</Badge> : null}
+          </p>
+          <p className="mt-1 text-[11px] text-muted-foreground">{lastAt ? formatTime(lastAt, locale) : "—"}</p>
+        </div>
+        <div className="border-b p-4 sm:border-r sm:border-b-0">
+          <p className="text-xs text-muted-foreground">{t("qualityGuard.resinStreamStats")}</p>
+          <p className="mt-1 text-sm tabular-nums">
+            {t("qualityGuard.resinStreamStatsDetail", {
+              total: String(stream.total ?? 0),
+              healthy: String(stream.healthy ?? 0),
+              degraded: String(stream.degraded ?? 0),
+              retried: String(stream.retried ?? 0),
+            })}
+          </p>
+        </div>
+        <div className="p-4">
+          <p className="text-xs text-muted-foreground">{t("qualityGuard.resinReshuffles")}</p>
+          <p className="mt-1 text-lg font-medium tabular-nums">{stream.reshuffles ?? resin.state?.statistics?.actions?.reshuffles ?? 0}</p>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            retry ok {stream.retryHealthy ?? 0} / fail {stream.retryFailed ?? 0}
+          </p>
+        </div>
+      </div>
+    </section>
   );
 }
 
