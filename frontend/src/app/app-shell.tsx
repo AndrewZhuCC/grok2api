@@ -28,6 +28,7 @@ const navigation = [
   { href: "/gallery", label: "nav.gallery", icon: Image },
   { href: "/video-gallery", label: "nav.videoGallery", icon: Video },
   { href: "/request-audits", label: "nav.audits", icon: Eye },
+{ href: "/quality-guard", label: "nav.qualityGuard", icon: ShieldCheck },
   { href: "/resin-quality-guard", label: "nav.resinQualityGuard", icon: ShieldCheck },
   { href: "/creative-console", label: "nav.creativeConsole", icon: Sparkles },
 ] as const;

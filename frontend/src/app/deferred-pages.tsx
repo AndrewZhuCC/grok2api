@@ -12,6 +12,7 @@ const ApiDocsPage = lazyNamed(() => import("@/features/docs/api-docs-page"), "Ap
 const GalleryPage = lazyNamed(() => import("@/features/media/gallery-page"), "GalleryPage");
 const VideoGalleryPage = lazyNamed(() => import("@/features/media/video-gallery-page"), "VideoGalleryPage");
 const ModelsPage = lazyNamed(() => import("@/features/models/models-page"), "ModelsPage");
+const QualityGuardPage = lazyNamed(() => import("@/features/quality-guard/quality-guard-page"), "QualityGuardPage");
 const SettingsPage = lazyNamed(() => import("@/features/settings/settings-page"), "SettingsPage");
 const ResinQualityGuardPage = lazyNamed(() => import("@/features/resin-quality-guard/resin-quality-guard-page"), "ResinQualityGuardPage");
 
@@ -37,6 +38,10 @@ export function DeferredDashboardPage() {
 
 export function DeferredModelsPage() {
   return <DeferredPage page={ModelsPage} />;
+}
+
+export function DeferredQualityGuardPage() {
+  return <DeferredPage page={QualityGuardPage} />;
 }
 
 export function DeferredClientKeysPage() {
