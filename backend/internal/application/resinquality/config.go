@@ -34,12 +34,16 @@ type Config struct {
 	// as soft degradation, OR-combined with TPS classification.
 	ZeroReasoningSoft bool
 	// StreamWatchEnabled peeks streaming Build replies: content without prior thinking
-	// is treated as degraded → clear Resin pool and allow one transparent retry.
+	// is treated as degraded → clear Resin pool and transparently retry (each attempt
+	// is preflighted again) up to StreamMaxAttempts total tries.
 	StreamWatchEnabled bool
 	// StreamWatchTimeout bounds how long preflight waits for the first semantic signal.
 	StreamWatchTimeout time.Duration
-	RequestTimeout     time.Duration
-	StateFile          string
+	// StreamMaxAttempts is the total number of preflighted upstream attempts per request
+	// (1 = watch only, no retry; 3 = original + up to 2 retries). Clamped to 1..8.
+	StreamMaxAttempts int
+	RequestTimeout    time.Duration
+	StateFile         string
 
 	// Optional: use local gateway base for model probe.
 	// Prefer in-process ClientKey List/Reveal (like creative console) over env secret.
@@ -76,6 +80,7 @@ func LoadConfigFromEnv() Config {
 		ZeroReasoningSoft:  envBool("RESIN_QUALITY_GUARD_ZERO_REASONING_SOFT", true),
 		StreamWatchEnabled: envBool("RESIN_QUALITY_GUARD_STREAM_WATCH", true),
 		StreamWatchTimeout: time.Duration(envInt("RESIN_QUALITY_GUARD_STREAM_WATCH_TIMEOUT_SECONDS", 45)) * time.Second,
+		StreamMaxAttempts:  envInt("RESIN_QUALITY_GUARD_STREAM_MAX_ATTEMPTS", 3),
 		RequestTimeout:     time.Duration(envInt("RESIN_QUALITY_GUARD_REQUEST_TIMEOUT_SECONDS", 60)) * time.Second,
 		StateFile:          envStr("RESIN_QUALITY_GUARD_STATE_FILE", "/app/data/resin-quality-guard-state.json"),
 		ProbeBaseURL:       strings.TrimRight(envStr("RESIN_QUALITY_GUARD_PROBE_BASE_URL", ""), "/"),
@@ -94,7 +99,18 @@ func LoadConfigFromEnv() Config {
 		cfg.SoftTPS = 500
 		cfg.HardTPS = 1000
 	}
+	cfg.StreamMaxAttempts = clampStreamMaxAttempts(cfg.StreamMaxAttempts)
 	return cfg
+}
+
+func clampStreamMaxAttempts(n int) int {
+	if n < 1 {
+		return 3
+	}
+	if n > 8 {
+		return 8
+	}
+	return n
 }
 
 func (c Config) CanRun() bool {

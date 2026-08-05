@@ -51,6 +51,7 @@ type Status struct {
 type PublicCfg struct {
 	ActionMode         string `json:"actionMode"`
 	StreamWatchEnabled bool   `json:"streamWatchEnabled"`
+	StreamMaxAttempts  int    `json:"streamMaxAttempts"`
 	PlatformID         string `json:"platformId"`
 	HasProxyURL        bool   `json:"hasProxyUrl"`
 }
@@ -59,6 +60,7 @@ func (g *Guard) publicCfg() PublicCfg {
 	return PublicCfg{
 		ActionMode:         g.cfg.ActionMode,
 		StreamWatchEnabled: g.cfg.StreamWatchEnabled,
+		StreamMaxAttempts:  g.StreamMaxAttempts(),
 		PlatformID:         g.cfg.PlatformID,
 		HasProxyURL:        g.cfg.ResinProxyURL != "",
 	}
@@ -75,6 +77,31 @@ func (g *Guard) StreamWatchTimeout() time.Duration {
 		return 45 * time.Second
 	}
 	return g.cfg.StreamWatchTimeout
+}
+
+// StreamMaxAttempts returns the effective total preflight attempts per request.
+// UI override in state wins over process config when set.
+func (g *Guard) StreamMaxAttempts() int {
+	if g == nil {
+		return 3
+	}
+	snap := g.store.snapshot()
+	if snap.StreamMaxAttemptsOverride > 0 {
+		return clampStreamMaxAttempts(snap.StreamMaxAttemptsOverride)
+	}
+	return clampStreamMaxAttempts(g.cfg.StreamMaxAttempts)
+}
+
+// UpdateStreamMaxAttempts persists a UI-editable attempt cap (1..8).
+func (g *Guard) UpdateStreamMaxAttempts(n int) int {
+	if g == nil {
+		return 3
+	}
+	n = clampStreamMaxAttempts(n)
+	g.store.update(func(st *State) {
+		st.StreamMaxAttemptsOverride = n
+	})
+	return n
 }
 
 // GetStatus returns UI status for stream-watch + pool actions.
@@ -97,9 +124,13 @@ func (g *Guard) GetStatus(ctx context.Context) Status {
 // - degraded: content without prior thinking (interrupt + reshuffle + retry)
 // - healthy: everything else that was preflighted without triggering interrupt
 //   (thinking present, timeout/EOF pass-through, tool-only, etc.)
-func (g *Guard) RecordStreamWatch(verdict StreamWatchVerdict, retried bool) {
+// attempt is 1-based within the current request cycle.
+func (g *Guard) RecordStreamWatch(verdict StreamWatchVerdict, attempt int) {
 	if g == nil {
 		return
+	}
+	if attempt < 1 {
+		attempt = 1
 	}
 	now := float64(time.Now().Unix())
 	g.store.update(func(st *State) {
@@ -108,27 +139,39 @@ func (g *Guard) RecordStreamWatch(verdict StreamWatchVerdict, retried bool) {
 		st.LastStreamReason = verdict.Reason
 		st.LastStreamAt = now
 		st.LastStreamDegraded = verdict.Degraded
+		st.LastStreamAttempts = attempt
 		if verdict.Degraded {
 			st.bump("stream", "degraded", 1)
 			st.appendEvent(Event{
 				TS: now, Event: "stream_degraded", Reason: verdict.Reason,
-				Classification: ClassHard, Source: "stream_watch",
+				Classification: ClassHard, Source: "stream_watch", Attempts: attempt,
 			})
 		} else {
-			// Non-degraded preflight always counts as healthy for the stream-watch
-			// ledger (including pass-through on timeout/EOF). Thinking is the common case.
 			st.bump("stream", "healthy", 1)
-		}
-		if retried {
-			st.bump("stream", "retried", 1)
 		}
 	})
 }
 
-// RecordStreamRetryOutcome notes whether the post-reshuffle retry recovered.
-func (g *Guard) RecordStreamRetryOutcome(healthy bool, meta StreamDegradedMeta) {
+// RecordStreamRetryIssued bumps the retried counter when a reshuffle+re-request is started.
+func (g *Guard) RecordStreamRetryIssued() {
 	if g == nil {
 		return
+	}
+	g.store.update(func(st *State) { st.bump("stream", "retried", 1) })
+}
+
+// RecordStreamCycleOutcome notes the end of a multi-attempt recovery cycle.
+// healthy=true means a later attempt passed preflight; false means exhausted or retry transport failed.
+func (g *Guard) RecordStreamCycleOutcome(healthy bool, meta StreamDegradedMeta) {
+	if g == nil {
+		return
+	}
+	attempts := meta.AttemptsUsed
+	if attempts < 1 {
+		attempts = meta.Attempt
+	}
+	if attempts < 1 {
+		attempts = 1
 	}
 	outcome := "failed"
 	if healthy {
@@ -144,35 +187,54 @@ func (g *Guard) RecordStreamRetryOutcome(healthy bool, meta StreamDegradedMeta) 
 		"reason", meta.Reason,
 		"first_signal", meta.FirstSignal,
 		"peek_ms", meta.PeekMS,
+		"attempt", meta.Attempt,
+		"attempts_used", attempts,
+		"max_attempts", meta.MaxAttempts,
 	)
 	eventName := "stream_retry_failed"
 	if healthy {
 		eventName = "stream_retry_healthy"
 	}
 	g.store.update(func(st *State) {
+		st.LastStreamAttempts = attempts
+		st.LastStreamDegraded = !healthy
 		if healthy {
 			st.bump("stream", "retryHealthy", 1)
+			switch {
+			case attempts <= 1:
+				st.bump("stream", "recoveredAt1", 1)
+			case attempts == 2:
+				st.bump("stream", "recoveredAt2", 1)
+			case attempts == 3:
+				st.bump("stream", "recoveredAt3", 1)
+			default:
+				st.bump("stream", "recoveredAt4Plus", 1)
+			}
 		} else {
 			st.bump("stream", "retryFailed", 1)
+			st.bump("stream", "exhausted", 1)
 		}
 		st.appendEvent(Event{
 			TS: float64(time.Now().Unix()), Event: eventName,
 			Reason: meta.Reason, Classification: ClassHard, Source: "stream_watch",
-			AuditID: meta.RequestID,
+			AuditID: meta.RequestID, Attempts: attempts,
 		})
 	})
 }
 
 // StreamDegradedMeta carries request-scoped diagnostics for stream-watch logs/events.
 type StreamDegradedMeta struct {
-	RequestID   string
-	AccountID   uint64
-	AccountName string
-	Model       string
-	Protocol    string
-	FirstSignal string
-	Reason      string
-	PeekMS      int64
+	RequestID    string
+	AccountID    uint64
+	AccountName  string
+	Model        string
+	Protocol     string
+	FirstSignal  string
+	Reason       string
+	PeekMS       int64
+	Attempt      int // 1-based attempt that produced this verdict
+	MaxAttempts  int
+	AttemptsUsed int // final attempts used when recording cycle outcome
 }
 
 // HandleStreamDegraded clears the Resin pool after a content-without-thinking hit.
@@ -195,6 +257,8 @@ func (g *Guard) HandleStreamDegraded(ctx context.Context, meta StreamDegradedMet
 		"protocol", meta.Protocol,
 		"first_signal", meta.FirstSignal,
 		"peek_ms", meta.PeekMS,
+		"attempt", meta.Attempt,
+		"max_attempts", meta.MaxAttempts,
 		"cleared", cleared,
 	}
 	if err != nil {
@@ -214,8 +278,7 @@ func (g *Guard) HandleStreamDegraded(ctx context.Context, meta StreamDegradedMet
 		st.appendEvent(Event{
 			TS: float64(time.Now().Unix()), Event: "stream_pool_reshuffled",
 			Reason: reason, Classification: ClassHard, Cleared: cleared, Source: "stream_watch",
-			// Reuse AuditID/Tokens fields lightly for request correlation in the admin event feed.
-			AuditID: meta.RequestID,
+			AuditID: meta.RequestID, Attempts: meta.Attempt,
 		})
 	})
 	return result, err

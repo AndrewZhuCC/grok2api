@@ -45,6 +45,8 @@ type Event struct {
 	AuditID        string  `json:"auditId,omitempty"`
 	Source         string  `json:"source,omitempty"`
 	Tokens         int64   `json:"tokens,omitempty"`
+	// Attempts is the 1-based attempt index (or total attempts used) for stream-watch events.
+	Attempts int `json:"attempts,omitempty"`
 }
 
 // SoftSample is a compact recent soft-hit row for the admin UI.
@@ -79,10 +81,16 @@ type State struct {
 	LastPassiveClass    string       `json:"lastPassiveClass,omitempty"`
 	LastPassiveAuditID  string       `json:"lastPassiveAuditId,omitempty"`
 	RecentSoftSamples   []SoftSample `json:"recentSoftSamples,omitempty"`
-	LastStreamSignal    string       `json:"lastStreamSignal,omitempty"`
-	LastStreamReason    string       `json:"lastStreamReason,omitempty"`
-	LastStreamAt        float64      `json:"lastStreamAt,omitempty"`
-	LastStreamDegraded  bool         `json:"lastStreamDegraded,omitempty"`
+	LastStreamSignal   string  `json:"lastStreamSignal,omitempty"`
+	LastStreamReason   string  `json:"lastStreamReason,omitempty"`
+	LastStreamAt       float64 `json:"lastStreamAt,omitempty"`
+	LastStreamDegraded bool    `json:"lastStreamDegraded,omitempty"`
+	// LastStreamAttempts is how many preflighted attempts the last stream-watch
+	// cycle used before healthy recovery or exhaustion (1 = first try healthy).
+	LastStreamAttempts int `json:"lastStreamAttempts,omitempty"`
+	// StreamMaxAttemptsOverride is a UI-editable cap persisted in state.
+	// 0 means "use process config / env default".
+	StreamMaxAttemptsOverride int `json:"streamMaxAttemptsOverride,omitempty"`
 }
 
 func defaultState() State {
@@ -94,7 +102,11 @@ func defaultState() State {
 			Passive: map[string]int{"total": 0, "healthy": 0, "soft": 0, "hard": 0, "ignored": 0},
 			Active:  map[string]int{"total": 0, "healthy": 0, "soft": 0, "hard": 0, "error": 0},
 			Actions: map[string]int{"quarantined": 0, "restored": 0, "reshuffles": 0, "targetedClears": 0},
-			Stream:  map[string]int{"total": 0, "healthy": 0, "degraded": 0, "retried": 0, "retryHealthy": 0, "retryFailed": 0, "reshuffles": 0},
+			Stream: map[string]int{
+				"total": 0, "healthy": 0, "degraded": 0, "retried": 0,
+				"retryHealthy": 0, "retryFailed": 0, "reshuffles": 0, "exhausted": 0,
+				"recoveredAt1": 0, "recoveredAt2": 0, "recoveredAt3": 0, "recoveredAt4Plus": 0,
+			},
 		},
 		Events:    []Event{},
 		StartedAt: now,
@@ -136,7 +148,10 @@ func (s *stateStore) ensureMaps() {
 		s.cur.Statistics.Stream = map[string]int{}
 	}
 	// Ensure stream ledger keys always exist so UI never falls back to legacy actions.*.
-	for _, key := range []string{"total", "healthy", "degraded", "retried", "retryHealthy", "retryFailed", "reshuffles"} {
+	for _, key := range []string{
+		"total", "healthy", "degraded", "retried", "retryHealthy", "retryFailed",
+		"reshuffles", "exhausted", "recoveredAt1", "recoveredAt2", "recoveredAt3", "recoveredAt4Plus",
+	} {
 		if _, ok := s.cur.Statistics.Stream[key]; !ok {
 			s.cur.Statistics.Stream[key] = 0
 		}

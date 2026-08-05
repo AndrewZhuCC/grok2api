@@ -993,81 +993,92 @@ func (h *Handler) writeAnthropicResult(c *gin.Context, result *gateway.Result, s
 	h.writeProtocolResult(c, result, stream, true, streamProtocolAnthropic)
 }
 
-// writeResultWithRetry is like writeProtocolResult, but for streaming Build replies it
-// peeks the first semantic signal. Content without prior thinking triggers Resin pool
-// clear + exactly one transparent re-request before any bytes reach the client.
+// writeResultWithRetry peeks streaming Build replies for content-without-thinking.
+// Each attempt is preflighted. On degradation the Resin pool is cleared and the
+// request is transparently re-issued up to StreamMaxAttempts total tries.
 func (h *Handler) writeResultWithRetry(c *gin.Context, result *gateway.Result, stream, anthropic bool, protocol streamProtocol, retry func(context.Context) (*gateway.Result, error)) {
 	if !stream || retry == nil || h.resinQuality == nil || !h.resinQuality.StreamWatchEnabled() {
 		h.writeProtocolResult(c, result, stream, anthropic, protocol)
 		return
 	}
-	if result.StatusCode < 200 || result.StatusCode >= 300 {
-		h.writeProtocolResult(c, result, stream, anthropic, protocol)
-		return
-	}
-	// Only Grok Build is expected to always think first; skip other providers.
 	if result.Provider != string(account.ProviderBuild) {
 		h.writeProtocolResult(c, result, stream, anthropic, protocol)
 		return
 	}
 
 	watchProtocol := streamWatchProtocol(protocol)
-	verdict, preflightErr := resinqualityapp.PreflightStream(result.Body, watchProtocol, h.resinQuality.StreamWatchTimeout())
-	if preflightErr != nil {
-		// Treat preflight I/O errors as a normal stream failure path.
-		_ = result.Body.Close()
-		result.Finalize(gateway.Usage{}, "", "upstream_stream_interrupted")
-		if anthropic {
-			writeAnthropicError(c, http.StatusBadGateway, "api_error", "upstream stream interrupted")
-		} else {
-			writeOpenAIError(c, http.StatusBadGateway, "upstream_stream_interrupted", "读取上游流失败")
+	maxAttempts := h.resinQuality.StreamMaxAttempts()
+	requestID := strings.TrimSpace(c.GetString(middleware.RequestIDKey))
+	current := result
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if current.StatusCode < 200 || current.StatusCode >= 300 {
+			h.writeProtocolResult(c, current, stream, anthropic, protocol)
+			return
 		}
-		return
-	}
 
-	if !verdict.Degraded {
-		h.resinQuality.RecordStreamWatch(verdict, false)
-		// Replay buffered preflight bytes, then continue the live body.
-		result.Body = resinqualityapp.NewReplayBody(verdict.Buffered, result.Body)
-		h.writeProtocolResult(c, result, stream, anthropic, protocol)
-		return
-	}
-
-	// Degraded: discard first attempt, reshuffle Resin, retry once.
-	h.resinQuality.RecordStreamWatch(verdict, true)
-	_ = result.Body.Close()
-	result.Finalize(gateway.Usage{}, "", "stream_degraded_content_without_thinking")
-
-	meta := resinqualityapp.StreamDegradedMeta{
-		RequestID:   strings.TrimSpace(c.GetString(middleware.RequestIDKey)),
-		AccountID:   result.AccountID,
-		AccountName: result.AccountName,
-		Model:       result.Model,
-		Protocol:    watchProtocol,
-		FirstSignal: verdict.FirstSignal,
-		Reason:      verdict.Reason,
-		PeekMS:      verdict.PeekMS,
-	}
-	if _, reshuffleErr := h.resinQuality.HandleStreamDegraded(c.Request.Context(), meta); reshuffleErr != nil {
-		// Still attempt retry; reshuffle failure is logged inside the guard.
-	}
-
-	retryResult, retryErr := retry(c.Request.Context())
-	if retryErr != nil {
-		h.resinQuality.RecordStreamRetryOutcome(false, meta)
-		if anthropic {
-			writeGatewayAnthropicError(c, retryErr)
-		} else {
-			writeGatewayError(c, retryErr)
+		verdict, preflightErr := resinqualityapp.PreflightStream(current.Body, watchProtocol, h.resinQuality.StreamWatchTimeout())
+		if preflightErr != nil {
+			_ = current.Body.Close()
+			current.Finalize(gateway.Usage{}, "", "upstream_stream_interrupted")
+			if anthropic {
+				writeAnthropicError(c, http.StatusBadGateway, "api_error", "upstream stream interrupted")
+			} else {
+				writeOpenAIError(c, http.StatusBadGateway, "upstream_stream_interrupted", "读取上游流失败")
+			}
+			return
 		}
-		return
-	}
 
-	// Second attempt: do NOT preflight again (one transparent retry only).
-	// Still record whether the retry itself looks healthy if we can cheaply peek —
-	// but to keep latency low and avoid double-buffering, just forward.
-	h.resinQuality.RecordStreamRetryOutcome(true, meta)
-	h.writeProtocolResult(c, retryResult, stream, anthropic, protocol)
+		meta := resinqualityapp.StreamDegradedMeta{
+			RequestID: requestID, AccountID: current.AccountID, AccountName: current.AccountName,
+			Model: current.Model, Protocol: watchProtocol, FirstSignal: verdict.FirstSignal,
+			Reason: verdict.Reason, PeekMS: verdict.PeekMS, Attempt: attempt, MaxAttempts: maxAttempts,
+		}
+
+		if !verdict.Degraded {
+			h.resinQuality.RecordStreamWatch(verdict, attempt)
+			if attempt > 1 {
+				meta.AttemptsUsed = attempt
+				h.resinQuality.RecordStreamCycleOutcome(true, meta)
+			}
+			current.Body = resinqualityapp.NewReplayBody(verdict.Buffered, current.Body)
+			h.writeProtocolResult(c, current, stream, anthropic, protocol)
+			return
+		}
+
+		// Degraded: close this attempt, reshuffle, and retry while budget remains.
+		h.resinQuality.RecordStreamWatch(verdict, attempt)
+		_ = current.Body.Close()
+		current.Finalize(gateway.Usage{}, "", "stream_degraded_content_without_thinking")
+		if _, reshuffleErr := h.resinQuality.HandleStreamDegraded(c.Request.Context(), meta); reshuffleErr != nil {
+			// Still attempt retry; reshuffle failure is logged inside the guard.
+		}
+
+		if attempt >= maxAttempts {
+			meta.AttemptsUsed = attempt
+			h.resinQuality.RecordStreamCycleOutcome(false, meta)
+			if anthropic {
+				writeAnthropicError(c, http.StatusBadGateway, "api_error", "stream degraded: content without thinking after max retries")
+			} else {
+				writeOpenAIError(c, http.StatusBadGateway, "stream_degraded_exhausted", "流式降智：达到最大重试次数仍无 thinking")
+			}
+			return
+		}
+
+		h.resinQuality.RecordStreamRetryIssued()
+		next, retryErr := retry(c.Request.Context())
+		if retryErr != nil {
+			meta.AttemptsUsed = attempt
+			h.resinQuality.RecordStreamCycleOutcome(false, meta)
+			if anthropic {
+				writeGatewayAnthropicError(c, retryErr)
+			} else {
+				writeGatewayError(c, retryErr)
+			}
+			return
+		}
+		current = next
+	}
 }
 
 func streamWatchProtocol(protocol streamProtocol) string {

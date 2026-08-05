@@ -1,7 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient, type UseMutationResult } from "@tanstack/react-query";
 import { Activity, AlertTriangle, BarChart3, Bot, Coins, Eye, Gauge, MoreHorizontal, Pencil, Plus, Power, PowerOff, RefreshCw, RotateCcw, RotateCw, Shield, ShieldCheck, ShieldX, Shuffle, TimerReset, Trash2, Zap } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -19,7 +19,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { getQualityGuardStatus, runQualityTest, updateQualityGuardPolicy, type QualityGuardEvent, type QualityGuardNodeState, type QualityGuardPolicy, type QualityGuardStatistics, type QualityGuardStatus, type QualityTestResult } from "@/features/quality-guard/quality-guard-api";
-import { getResinQualityStatus, postResinQualityReshuffle, type ResinQualityStatus } from "@/features/resin-quality-guard/resin-quality-guard-api";
+import { getResinQualityStatus, postResinQualityReshuffle, updateResinQualityConfig, type ResinQualityStatus } from "@/features/resin-quality-guard/resin-quality-guard-api";
 import { createEgressNode, deleteEgressNodes, listAllEgressNodes, updateEgressNode, updateEgressNodesEnabled, type EgressNodeDTO, type EgressNodeInput } from "@/features/settings/settings-api";
 import { ErrorState } from "@/shared/components/data-state";
 import { PageHeader } from "@/shared/components/page-header";
@@ -61,6 +61,14 @@ export function QualityGuardPage() {
       void queryClient.invalidateQueries({ queryKey: ["resin-quality-guard"] });
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : t("qualityGuard.resinReshuffleFailed"), { id: "resin-reshuffle" }),
+  });
+  const resinConfigMutation = useMutation({
+    mutationFn: (streamMaxAttempts: number) => updateResinQualityConfig({ streamMaxAttempts }),
+    onSuccess: () => {
+      toast.success(t("qualityGuard.resinMaxAttemptsSaved"));
+      void queryClient.invalidateQueries({ queryKey: ["resin-quality-guard"] });
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : t("qualityGuard.resinMaxAttemptsSaveFailed")),
   });
   const testMutation = useMutation({
     mutationFn: ({ nodeId, status }: { nodeId: string; status: QualityGuardStatus }) => runQualityTest(nodeId, status),
@@ -182,7 +190,9 @@ export function QualityGuardPage() {
         resin={resin}
         locale={i18n.language}
         reshuffling={resinReshuffleMutation.isPending}
+        savingConfig={resinConfigMutation.isPending}
         onReshuffle={() => resinReshuffleMutation.mutate()}
+        onSaveMaxAttempts={(n) => resinConfigMutation.mutate(n)}
       />
 
       {!status?.available ? <UnavailableState /> : (
@@ -258,14 +268,23 @@ function ResinStreamPanel({
   resin,
   locale,
   reshuffling,
+  savingConfig,
   onReshuffle,
+  onSaveMaxAttempts,
 }: {
   resin?: ResinQualityStatus;
   locale: string;
   reshuffling: boolean;
+  savingConfig: boolean;
   onReshuffle: () => void;
+  onSaveMaxAttempts: (n: number) => void;
 }) {
   const { t } = useTranslation();
+  const configuredMax = resin?.config?.streamMaxAttempts ?? 3;
+  const [maxAttemptsDraft, setMaxAttemptsDraft] = useState(String(configuredMax));
+  useEffect(() => {
+    setMaxAttemptsDraft(String(configuredMax));
+  }, [configuredMax]);
   if (!resin?.available) {
     return (
       <section className="overflow-hidden rounded-lg border border-dashed bg-card/50 px-4 py-4 sm:px-5" aria-labelledby="resin-stream-title">
@@ -277,6 +296,14 @@ function ResinStreamPanel({
   const stream = resin.state?.statistics?.stream ?? {};
   const lastAt = resin.state?.lastStreamAt;
   const degraded = Boolean(resin.state?.lastStreamDegraded);
+  const lastAttempts = resin.state?.lastStreamAttempts ?? 0;
+  const recoveredDetail = t("qualityGuard.resinRecoveredDetail", {
+    at1: String(stream.recoveredAt1 ?? 0),
+    at2: String(stream.recoveredAt2 ?? 0),
+    at3: String(stream.recoveredAt3 ?? 0),
+    at4: String(stream.recoveredAt4Plus ?? 0),
+    exhausted: String(stream.exhausted ?? 0),
+  });
   return (
     <section className="overflow-hidden rounded-lg bg-card" aria-labelledby="resin-stream-title">
       <div className="flex flex-col gap-3 border-b px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
@@ -284,15 +311,53 @@ function ResinStreamPanel({
           <h2 id="resin-stream-title" className="text-sm font-medium">{t("qualityGuard.resinTitle")}</h2>
           <p className="mt-1 text-xs text-muted-foreground">{t("qualityGuard.resinHelp")}</p>
         </div>
-        <Button type="button" variant="destructive" size="sm" disabled={!resin.enabled || reshuffling} onClick={onReshuffle}>
-          {reshuffling ? <Spinner className="size-4" /> : <Shuffle className="size-4" />}
-          {t("qualityGuard.resinReshuffle")}
-        </Button>
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+          <div className="flex items-center gap-1.5 rounded-md border px-2 py-1">
+            <Label htmlFor="resin-max-attempts" className="whitespace-nowrap text-xs text-muted-foreground">{t("qualityGuard.resinMaxAttempts")}</Label>
+            <Input
+              id="resin-max-attempts"
+              className="h-7 w-14 text-center"
+              inputMode="numeric"
+              value={maxAttemptsDraft}
+              onChange={(e) => setMaxAttemptsDraft(e.target.value.replace(/[^\d]/g, ""))}
+              onBlur={() => {
+                if (maxAttemptsDraft === "" || maxAttemptsDraft === String(configuredMax)) {
+                  setMaxAttemptsDraft(String(configuredMax));
+                  return;
+                }
+              }}
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-7"
+              disabled={!resin.enabled || savingConfig || maxAttemptsDraft === String(configuredMax) || maxAttemptsDraft === ""}
+              onClick={() => {
+                const n = Number(maxAttemptsDraft);
+                if (!Number.isFinite(n) || n < 1 || n > 8) {
+                  toast.error(t("qualityGuard.resinMaxAttemptsInvalid"));
+                  setMaxAttemptsDraft(String(configuredMax));
+                  return;
+                }
+                onSaveMaxAttempts(n);
+              }}
+            >
+              {savingConfig ? <Spinner className="size-3.5" /> : null}
+              {t("common.save")}
+            </Button>
+          </div>
+          <Button type="button" variant="destructive" size="sm" disabled={!resin.enabled || reshuffling} onClick={onReshuffle}>
+            {reshuffling ? <Spinner className="size-4" /> : <Shuffle className="size-4" />}
+            {t("qualityGuard.resinReshuffle")}
+          </Button>
+        </div>
       </div>
       <div className="grid sm:grid-cols-2 xl:grid-cols-4">
         <div className="border-b p-4 sm:border-r xl:border-b-0">
           <p className="text-xs text-muted-foreground">{t("qualityGuard.resinStreamWatch")}</p>
           <p className="mt-1 text-lg font-medium">{resin.config?.streamWatchEnabled ? t("qualityGuard.running") : t("common.disabled")}</p>
+          <p className="mt-1 text-[11px] text-muted-foreground">{t("qualityGuard.resinMaxAttemptsHint", { count: String(configuredMax) })}</p>
         </div>
         <div className="border-b p-4 xl:border-b-0 xl:border-r">
           <p className="text-xs text-muted-foreground">{t("qualityGuard.resinLastSignal")}</p>
@@ -300,7 +365,10 @@ function ResinStreamPanel({
             {resin.state?.lastStreamReason || resin.state?.lastStreamSignal || "—"}
             {degraded ? <Badge className="ml-2" variant="destructive">{t("qualityGuard.resinDegraded")}</Badge> : null}
           </p>
-          <p className="mt-1 text-[11px] text-muted-foreground">{lastAt ? formatTime(lastAt, locale) : "—"}</p>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            {lastAt ? formatTime(lastAt, locale) : "—"}
+            {lastAttempts > 0 ? ` · ${t("qualityGuard.resinLastAttempts", { count: String(lastAttempts) })}` : ""}
+          </p>
         </div>
         <div className="border-b p-4 sm:border-r sm:border-b-0">
           <p className="text-xs text-muted-foreground">{t("qualityGuard.resinStreamStats")}</p>
@@ -312,10 +380,10 @@ function ResinStreamPanel({
               retried: String(stream.retried ?? 0),
             })}
           </p>
+          <p className="mt-1 text-[11px] text-muted-foreground">{recoveredDetail}</p>
         </div>
         <div className="p-4">
           <p className="text-xs text-muted-foreground">{t("qualityGuard.resinReshuffles")}</p>
-          {/* Only stream-watch reshuffles — never fall back to legacy actions.reshuffles. */}
           <p className="mt-1 text-lg font-medium tabular-nums">{stream.reshuffles ?? 0}</p>
           <p className="mt-1 text-[11px] text-muted-foreground">
             retry ok {stream.retryHealthy ?? 0} / fail {stream.retryFailed ?? 0}

@@ -20,6 +20,7 @@ func NewHandler(guard *resinqualityapp.Guard) *Handler {
 func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/resin-quality-guard", h.status)
 	router.POST("/resin-quality-guard/reshuffle", h.reshuffle)
+	router.PUT("/resin-quality-guard/config", h.updateConfig)
 }
 
 func (h *Handler) status(c *gin.Context) {
@@ -41,4 +42,25 @@ func (h *Handler) reshuffle(c *gin.Context) {
 		return
 	}
 	response.Success(c, http.StatusOK, result)
+}
+
+type updateConfigRequest struct {
+	StreamMaxAttempts *int `json:"streamMaxAttempts"`
+}
+
+func (h *Handler) updateConfig(c *gin.Context) {
+	if h.guard == nil || !h.guard.Enabled() {
+		response.Error(c, http.StatusServiceUnavailable, "resin_quality_guard_disabled", "Resin 质量守护未启用")
+		return
+	}
+	var req updateConfigRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.StreamMaxAttempts == nil {
+		response.Error(c, http.StatusBadRequest, "invalid_request", "streamMaxAttempts is required (1-8)")
+		return
+	}
+	n := h.guard.UpdateStreamMaxAttempts(*req.StreamMaxAttempts)
+	response.Success(c, http.StatusOK, gin.H{
+		"streamMaxAttempts": n,
+		"config":            h.guard.GetStatus(c.Request.Context()).Config,
+	})
 }

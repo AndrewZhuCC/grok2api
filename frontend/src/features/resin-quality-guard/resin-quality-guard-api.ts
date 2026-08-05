@@ -4,6 +4,7 @@ import { createObjectDecoder, createValidatedDecoder, hasShape, isArrayOf, isBoo
 export type ResinQualityPublicCfg = {
   actionMode: string;
   streamWatchEnabled?: boolean;
+  streamMaxAttempts?: number;
   platformId: string;
   hasProxyUrl: boolean;
 };
@@ -19,6 +20,7 @@ export type ResinQualityEvent = {
   auditId?: string;
   source?: string;
   tokens?: number;
+  attempts?: number;
 };
 
 export type ResinQualityStatus = {
@@ -53,6 +55,8 @@ export type ResinQualityStatus = {
     lastStreamReason?: string;
     lastStreamAt?: number;
     lastStreamDegraded?: boolean;
+    lastStreamAttempts?: number;
+    streamMaxAttemptsOverride?: number;
   };
 };
 
@@ -61,6 +65,7 @@ const numberRecord = isRecordOf(isNumber);
 const configShape = hasShape({
   actionMode: isString,
   streamWatchEnabled: isOptional(isBoolean),
+  streamMaxAttempts: isOptional(isNumber),
   platformId: isString,
   hasProxyUrl: isBoolean,
 });
@@ -90,6 +95,7 @@ const eventShape = hasShape({
   auditId: isOptional(isString),
   source: isOptional(isString),
   tokens: isOptional(isNumber),
+  attempts: isOptional(isNumber),
 });
 
 const stateShape = hasShape({
@@ -108,6 +114,8 @@ const stateShape = hasShape({
   lastStreamReason: isOptional(isString),
   lastStreamAt: isOptional(isNumber),
   lastStreamDegraded: isOptional(isBoolean),
+  lastStreamAttempts: isOptional(isNumber),
+  streamMaxAttemptsOverride: isOptional(isNumber),
 });
 
 const statusDecoder = createObjectDecoder<ResinQualityStatus>("resin quality status", {
@@ -125,4 +133,12 @@ export async function getResinQualityStatus(): Promise<ResinQualityStatus> {
 
 export async function postResinQualityReshuffle(): Promise<Record<string, unknown>> {
   return apiRequest("/api/admin/v1/resin-quality-guard/reshuffle", { method: "POST" }, looseObjectDecoder);
+}
+
+export async function updateResinQualityConfig(input: { streamMaxAttempts: number }): Promise<Record<string, unknown>> {
+  return apiRequest("/api/admin/v1/resin-quality-guard/config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  }, looseObjectDecoder);
 }
