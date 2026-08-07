@@ -91,6 +91,9 @@ type State struct {
 	// StreamMaxAttemptsOverride is a UI-editable cap persisted in state.
 	// 0 means "use process config / env default".
 	StreamMaxAttemptsOverride int `json:"streamMaxAttemptsOverride,omitempty"`
+	// StreamWatchOverride is a UI-editable on/off for stream-watch interrupt/retry.
+	// Empty means "use process config / env default"; "on"/"off" force the value.
+	StreamWatchOverride string `json:"streamWatchOverride,omitempty"`
 }
 
 func defaultState() State {

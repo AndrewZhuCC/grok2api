@@ -59,7 +59,7 @@ type PublicCfg struct {
 func (g *Guard) publicCfg() PublicCfg {
 	return PublicCfg{
 		ActionMode:         g.cfg.ActionMode,
-		StreamWatchEnabled: g.cfg.StreamWatchEnabled,
+		StreamWatchEnabled: g.StreamWatchEnabled(),
 		StreamMaxAttempts:  g.StreamMaxAttempts(),
 		PlatformID:         g.cfg.PlatformID,
 		HasProxyURL:        g.cfg.ResinProxyURL != "",
@@ -67,8 +67,36 @@ func (g *Guard) publicCfg() PublicCfg {
 }
 
 // StreamWatchEnabled reports whether live stream first-signal watching is on.
+// When off, inference does not interrupt, reshuffle, or transparently retry.
+// UI override in state wins over process config when set to "on"/"off".
 func (g *Guard) StreamWatchEnabled() bool {
-	return g != nil && g.cfg.CanRun() && g.cfg.StreamWatchEnabled
+	if g == nil || !g.cfg.CanRun() {
+		return false
+	}
+	snap := g.store.snapshot()
+	switch strings.ToLower(strings.TrimSpace(snap.StreamWatchOverride)) {
+	case "on", "true", "1":
+		return true
+	case "off", "false", "0":
+		return false
+	}
+	return g.cfg.StreamWatchEnabled
+}
+
+// UpdateStreamWatchEnabled persists a UI-editable stream-watch on/off switch.
+func (g *Guard) UpdateStreamWatchEnabled(enabled bool) bool {
+	if g == nil {
+		return false
+	}
+	value := "off"
+	if enabled {
+		value = "on"
+	}
+	g.store.update(func(st *State) {
+		st.StreamWatchOverride = value
+	})
+	g.log.Info("stream_watch_toggled", "enabled", enabled)
+	return enabled
 }
 
 // StreamWatchTimeout is the preflight wait bound.

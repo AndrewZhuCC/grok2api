@@ -45,7 +45,8 @@ func (h *Handler) reshuffle(c *gin.Context) {
 }
 
 type updateConfigRequest struct {
-	StreamMaxAttempts *int `json:"streamMaxAttempts"`
+	StreamMaxAttempts  *int  `json:"streamMaxAttempts"`
+	StreamWatchEnabled *bool `json:"streamWatchEnabled"`
 }
 
 func (h *Handler) updateConfig(c *gin.Context) {
@@ -54,13 +55,25 @@ func (h *Handler) updateConfig(c *gin.Context) {
 		return
 	}
 	var req updateConfigRequest
-	if err := c.ShouldBindJSON(&req); err != nil || req.StreamMaxAttempts == nil {
-		response.Error(c, http.StatusBadRequest, "invalid_request", "streamMaxAttempts is required (1-8)")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, http.StatusBadRequest, "invalid_request", "invalid JSON body")
 		return
 	}
-	n := h.guard.UpdateStreamMaxAttempts(*req.StreamMaxAttempts)
-	response.Success(c, http.StatusOK, gin.H{
-		"streamMaxAttempts": n,
-		"config":            h.guard.GetStatus(c.Request.Context()).Config,
-	})
+	if req.StreamMaxAttempts == nil && req.StreamWatchEnabled == nil {
+		response.Error(c, http.StatusBadRequest, "invalid_request", "streamMaxAttempts and/or streamWatchEnabled is required")
+		return
+	}
+	out := gin.H{"config": nil}
+	if req.StreamMaxAttempts != nil {
+		out["streamMaxAttempts"] = h.guard.UpdateStreamMaxAttempts(*req.StreamMaxAttempts)
+	}
+	if req.StreamWatchEnabled != nil {
+		out["streamWatchEnabled"] = h.guard.UpdateStreamWatchEnabled(*req.StreamWatchEnabled)
+	}
+	status := h.guard.GetStatus(c.Request.Context())
+	out["config"] = status.Config
+	// Always echo effective values so UI can sync after partial updates.
+	out["streamMaxAttempts"] = status.Config.StreamMaxAttempts
+	out["streamWatchEnabled"] = status.Config.StreamWatchEnabled
+	response.Success(c, http.StatusOK, out)
 }

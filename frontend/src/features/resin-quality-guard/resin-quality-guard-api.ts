@@ -57,6 +57,7 @@ export type ResinQualityStatus = {
     lastStreamDegraded?: boolean;
     lastStreamAttempts?: number;
     streamMaxAttemptsOverride?: number;
+    streamWatchOverride?: string;
   };
 };
 
@@ -116,6 +117,7 @@ const stateShape = hasShape({
   lastStreamDegraded: isOptional(isBoolean),
   lastStreamAttempts: isOptional(isNumber),
   streamMaxAttemptsOverride: isOptional(isNumber),
+  streamWatchOverride: isOptional(isString),
 });
 
 const statusDecoder = createObjectDecoder<ResinQualityStatus>("resin quality status", {
@@ -135,7 +137,10 @@ export async function postResinQualityReshuffle(): Promise<Record<string, unknow
   return apiRequest("/api/admin/v1/resin-quality-guard/reshuffle", { method: "POST" }, looseObjectDecoder);
 }
 
-export async function updateResinQualityConfig(input: { streamMaxAttempts: number }): Promise<Record<string, unknown>> {
+export async function updateResinQualityConfig(input: {
+  streamMaxAttempts?: number;
+  streamWatchEnabled?: boolean;
+}): Promise<Record<string, unknown>> {
   return apiRequest("/api/admin/v1/resin-quality-guard/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

@@ -63,12 +63,21 @@ export function QualityGuardPage() {
     onError: (error) => toast.error(error instanceof Error ? error.message : t("qualityGuard.resinReshuffleFailed"), { id: "resin-reshuffle" }),
   });
   const resinConfigMutation = useMutation({
-    mutationFn: (streamMaxAttempts: number) => updateResinQualityConfig({ streamMaxAttempts }),
-    onSuccess: () => {
-      toast.success(t("qualityGuard.resinMaxAttemptsSaved"));
+    mutationFn: (input: { streamMaxAttempts?: number; streamWatchEnabled?: boolean }) => updateResinQualityConfig(input),
+    onSuccess: (_data, variables) => {
+      if (typeof variables.streamWatchEnabled === "boolean") {
+        toast.success(variables.streamWatchEnabled ? t("qualityGuard.resinWatchEnabled") : t("qualityGuard.resinWatchDisabled"));
+      } else {
+        toast.success(t("qualityGuard.resinMaxAttemptsSaved"));
+      }
       void queryClient.invalidateQueries({ queryKey: ["resin-quality-guard"] });
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : t("qualityGuard.resinMaxAttemptsSaveFailed")),
+    onError: (error, variables) => {
+      const fallback = typeof variables.streamWatchEnabled === "boolean"
+        ? t("qualityGuard.resinWatchToggleFailed")
+        : t("qualityGuard.resinMaxAttemptsSaveFailed");
+      toast.error(error instanceof Error ? error.message : fallback);
+    },
   });
   const testMutation = useMutation({
     mutationFn: ({ nodeId, status }: { nodeId: string; status: QualityGuardStatus }) => runQualityTest(nodeId, status),
@@ -192,7 +201,8 @@ export function QualityGuardPage() {
         reshuffling={resinReshuffleMutation.isPending}
         savingConfig={resinConfigMutation.isPending}
         onReshuffle={() => resinReshuffleMutation.mutate()}
-        onSaveMaxAttempts={(n) => resinConfigMutation.mutate(n)}
+        onSaveMaxAttempts={(n) => resinConfigMutation.mutate({ streamMaxAttempts: n })}
+        onToggleWatch={(enabled) => resinConfigMutation.mutate({ streamWatchEnabled: enabled })}
       />
 
       {!status?.available ? <UnavailableState /> : (
@@ -271,6 +281,7 @@ function ResinStreamPanel({
   savingConfig,
   onReshuffle,
   onSaveMaxAttempts,
+  onToggleWatch,
 }: {
   resin?: ResinQualityStatus;
   locale: string;
@@ -278,9 +289,11 @@ function ResinStreamPanel({
   savingConfig: boolean;
   onReshuffle: () => void;
   onSaveMaxAttempts: (n: number) => void;
+  onToggleWatch: (enabled: boolean) => void;
 }) {
   const { t } = useTranslation();
   const configuredMax = resin?.config?.streamMaxAttempts ?? 3;
+  const watchEnabled = Boolean(resin?.config?.streamWatchEnabled);
   const [maxAttemptsDraft, setMaxAttemptsDraft] = useState(String(configuredMax));
   useEffect(() => {
     setMaxAttemptsDraft(String(configuredMax));
@@ -312,6 +325,15 @@ function ResinStreamPanel({
           <p className="mt-1 text-xs text-muted-foreground">{t("qualityGuard.resinHelp")}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+          <div className="flex items-center gap-2 rounded-md border px-2 py-1">
+            <Label htmlFor="resin-stream-watch" className="whitespace-nowrap text-xs text-muted-foreground">{t("qualityGuard.resinWatchToggle")}</Label>
+            <Switch
+              id="resin-stream-watch"
+              checked={watchEnabled}
+              disabled={!resin.enabled || savingConfig}
+              onCheckedChange={(checked) => onToggleWatch(checked)}
+            />
+          </div>
           <div className="flex items-center gap-1.5 rounded-md border px-2 py-1">
             <Label htmlFor="resin-max-attempts" className="whitespace-nowrap text-xs text-muted-foreground">{t("qualityGuard.resinMaxAttempts")}</Label>
             <Input
@@ -319,6 +341,7 @@ function ResinStreamPanel({
               className="h-7 w-14 text-center"
               inputMode="numeric"
               value={maxAttemptsDraft}
+              disabled={!watchEnabled}
               onChange={(e) => setMaxAttemptsDraft(e.target.value.replace(/[^\d]/g, ""))}
               onBlur={() => {
                 if (maxAttemptsDraft === "" || maxAttemptsDraft === String(configuredMax)) {
@@ -332,7 +355,7 @@ function ResinStreamPanel({
               variant="secondary"
               size="sm"
               className="h-7"
-              disabled={!resin.enabled || savingConfig || maxAttemptsDraft === String(configuredMax) || maxAttemptsDraft === ""}
+              disabled={!resin.enabled || !watchEnabled || savingConfig || maxAttemptsDraft === String(configuredMax) || maxAttemptsDraft === ""}
               onClick={() => {
                 const n = Number(maxAttemptsDraft);
                 if (!Number.isFinite(n) || n < 1 || n > 8) {
@@ -356,8 +379,12 @@ function ResinStreamPanel({
       <div className="grid sm:grid-cols-2 xl:grid-cols-4">
         <div className="border-b p-4 sm:border-r xl:border-b-0">
           <p className="text-xs text-muted-foreground">{t("qualityGuard.resinStreamWatch")}</p>
-          <p className="mt-1 text-lg font-medium">{resin.config?.streamWatchEnabled ? t("qualityGuard.running") : t("common.disabled")}</p>
-          <p className="mt-1 text-[11px] text-muted-foreground">{t("qualityGuard.resinMaxAttemptsHint", { count: String(configuredMax) })}</p>
+          <p className="mt-1 text-lg font-medium">{watchEnabled ? t("qualityGuard.running") : t("common.disabled")}</p>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            {watchEnabled
+              ? t("qualityGuard.resinMaxAttemptsHint", { count: String(configuredMax) })
+              : t("qualityGuard.resinWatchOffHint")}
+          </p>
         </div>
         <div className="border-b p-4 xl:border-b-0 xl:border-r">
           <p className="text-xs text-muted-foreground">{t("qualityGuard.resinLastSignal")}</p>
