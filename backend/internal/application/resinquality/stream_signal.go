@@ -106,7 +106,9 @@ func classifyAnthropicEvent(data []byte) string {
 	case "content_block_start":
 		switch event.ContentBlock.Type {
 		case "thinking":
-			return SignalThinking
+			// Empty thinking shell must NOT count as thinking. Only non-empty
+			// thinking_delta text is a real signal (zero-reasoning bypass guard).
+			return SignalNone
 		case "text":
 			// Empty text block start alone is not yet content; wait for delta.
 			// But starting text before any thinking is the degradation signal.
@@ -154,7 +156,9 @@ func classifyResponsesEvent(data []byte) string {
 	case "response.output_item.added", "response.output_item.done":
 		switch event.Item.Type {
 		case "reasoning":
-			return SignalThinking
+			// Empty reasoning item shell must NOT count as thinking. Real
+			// thinking requires non-empty reasoning_*_text.delta content.
+			return SignalNone
 		case "function_call", "web_search_call", "custom_tool_call":
 			return SignalTool
 		case "message":
