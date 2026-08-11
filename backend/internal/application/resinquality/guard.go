@@ -2,9 +2,12 @@ package resinquality
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/chenyme/grok2api/backend/internal/domain/account"
 )
 
 // Guard serves in-request stream-watch (content-without-thinking → reshuffle + retry)
@@ -255,6 +258,7 @@ type StreamDegradedMeta struct {
 	RequestID    string
 	AccountID    uint64
 	AccountName  string
+	Provider     string
 	Model        string
 	Protocol     string
 	FirstSignal  string
@@ -274,7 +278,7 @@ func (g *Guard) HandleStreamDegraded(ctx context.Context, meta StreamDegradedMet
 	if reason == "" {
 		reason = "content_without_thinking"
 	}
-	result, err := g.executePoolAction(ctx, reason, nil)
+	result, err := g.executePoolAction(ctx, reason, meta.AccountID, meta.Provider)
 	cleared := result.Cleared
 	logArgs := []any{
 		"reason", reason,
@@ -288,6 +292,7 @@ func (g *Guard) HandleStreamDegraded(ctx context.Context, meta StreamDegradedMet
 		"attempt", meta.Attempt,
 		"max_attempts", meta.MaxAttempts,
 		"cleared", cleared,
+		"provider", meta.Provider,
 	}
 	if err != nil {
 		logArgs = append(logArgs, "error", err.Error())
@@ -331,29 +336,21 @@ func (g *Guard) Run(ctx context.Context) error {
 	return nil
 }
 
-func (g *Guard) executePoolAction(ctx context.Context, reason string, suspect []string) (ActionResult, error) {
+func (g *Guard) executePoolAction(ctx context.Context, reason string, accountID uint64, provider string) (ActionResult, error) {
 	platformID := g.cfg.PlatformID
-	set := map[string]struct{}{}
-	for _, ip := range suspect {
-		ip = trim(ip)
-		if ip != "" {
-			set[ip] = struct{}{}
-		}
-	}
 	var result ActionResult
 	var err error
-	if g.cfg.ActionMode == "targeted" && len(set) > 0 {
-		result, err = g.resin.ClearLeasesForExitIPs(ctx, platformID, set)
-		if err == nil && result.Cleared == 0 {
-			result, err = g.resin.ReshufflePlatform(ctx, platformID)
-			result.Fallback = "reshuffle_empty_targeted"
-			g.store.update(func(st *State) { st.bump("actions", "reshuffles", 1) })
-		} else if err == nil {
-			g.store.update(func(st *State) { st.bump("actions", "targetedClears", 1) })
+	if accountID > 0 && provider == string(account.ProviderBuild) {
+		key := fmt.Sprintf("%s_%d", provider, accountID)
+		if err = g.resin.DeleteLeaseForAccountKey(ctx, platformID, key); err == nil {
+			result.Action = "delete_lease"
+			result.Cleared = 1
+			result.OK = true
+			result.Fallback = ""
 		} else {
-			g.log.Warn("targeted_clear_failed", "error", err)
+			g.log.Warn("targeted_lease_delete_failed", "error", err)
 			result, err = g.resin.ReshufflePlatform(ctx, platformID)
-			result.Fallback = "reshuffle_after_error"
+			result.Fallback = "reshuffle_after_targeted_delete_failed"
 			g.store.update(func(st *State) { st.bump("actions", "reshuffles", 1) })
 		}
 	} else {
@@ -380,7 +377,7 @@ func (g *Guard) ManualReshuffle(ctx context.Context) (ActionResult, error) {
 	if !g.Enabled() {
 		return ActionResult{}, errDisabled
 	}
-	return g.executePoolAction(ctx, "manual", nil)
+	return g.executePoolAction(ctx, "manual", 0, "")
 }
 
 var errDisabled = errString("resin quality guard disabled")

@@ -106,9 +106,16 @@ func (c *ResinClient) DeleteAllLeases(ctx context.Context, platformID string) er
 	return err
 }
 
-func (c *ResinClient) DeleteLease(ctx context.Context, platformID, account string) error {
-	path := "/api/v1/platforms/" + url.PathEscape(platformID) + "/leases/" + url.PathEscape(account)
-	_, _, err := c.do(ctx, http.MethodDelete, path, nil)
+func (c *ResinClient) DeleteLeaseForAccountKey(ctx context.Context, platformID, accountKey string) error {
+	if accountKey == "" {
+		return nil
+	}
+	path := "/api/v1/platforms/" + url.PathEscape(platformID) + "/leases/" + url.PathEscape(accountKey)
+	_, status, err := c.do(ctx, http.MethodDelete, path, nil)
+	// 404 = already gone; desired for per-account clear.
+	if err != nil && status == http.StatusNotFound {
+		return nil
+	}
 	return err
 }
 
@@ -198,7 +205,7 @@ func (c *ResinClient) ClearLeasesForExitIPs(ctx context.Context, platformID stri
 		if strings.TrimSpace(lease.Account) == "" {
 			continue
 		}
-		if err := c.DeleteLease(ctx, platformID, lease.Account); err != nil {
+		if err := c.DeleteLeaseForAccountKey(ctx, platformID, lease.Account); err != nil {
 			errors++
 			continue
 		}

@@ -1037,7 +1037,7 @@ func (h *Handler) writeResultWithRetry(c *gin.Context, result *gateway.Result, s
 
 		meta := resinqualityapp.StreamDegradedMeta{
 			RequestID: requestID, AccountID: current.AccountID, AccountName: current.AccountName,
-			Model: current.Model, Protocol: watchProtocol, FirstSignal: verdict.FirstSignal,
+			Provider: current.Provider, Model: current.Model, Protocol: watchProtocol, FirstSignal: verdict.FirstSignal,
 			Reason: verdict.Reason, PeekMS: verdict.PeekMS, Attempt: attempt, MaxAttempts: maxAttempts,
 		}
 
