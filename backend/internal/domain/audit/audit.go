@@ -14,6 +14,11 @@ const (
 	OperationVideo      Operation = "video"
 )
 
+// StatusQualityGuardInterrupt is the dedicated request-audit status for streams
+// interrupted by the in-process Resin quality guard (content without thinking).
+// It is not an HTTP status; the transport may still have received 2xx headers.
+const StatusQualityGuardInterrupt = -1
+
 type UsageSource string
 
 const (

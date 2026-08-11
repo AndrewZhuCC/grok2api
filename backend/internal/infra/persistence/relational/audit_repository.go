@@ -119,8 +119,9 @@ func validatePreparedAudit(value preparedAudit) error {
 	if !auditStringAllowed(row.EgressMode, "", "direct", "proxy") {
 		return errors.New("egress_mode is invalid")
 	}
-	if row.StatusCode < 100 || row.StatusCode > 599 {
-		return errors.New("status_code must be between 100 and 599")
+	// Allow -1 for quality-guard interrupts; otherwise keep standard HTTP range.
+	if row.StatusCode != -1 && (row.StatusCode < 100 || row.StatusCode > 599) {
+		return errors.New("status_code must be -1 (quality guard) or between 100 and 599")
 	}
 	attemptNumbers := make(map[int]struct{}, len(value.attempts))
 	for index, attempt := range value.attempts {
@@ -715,8 +716,8 @@ func applyAuditQuery(query *gorm.DB, search string, start, end time.Time, filter
 	case "other":
 		// 保留真实 HTTP 状态：2xx 响应头之后的流失败通过 error_code 识别；
 		// 同时覆盖不属于 2xx/4xx/5xx 的状态段。status_code < 100 兼容
-		// 曾运行过早期实现并写入 0 的开发数据库，但新记录仍只允许 100..599。
-		query = query.Where("(status_code >= 200 AND status_code < 300 AND error_code IS NOT NULL AND error_code <> '') OR status_code < 200 OR (status_code >= 300 AND status_code < 400) OR status_code >= 600")
+		// 早期 0 与质量守护 -1；新记录允许 -1 或 100..599。
+		query = query.Where("(status_code >= 200 AND status_code < 300 AND error_code IS NOT NULL AND error_code <> '') OR status_code < 200 OR (status_code >= 300 AND status_code < 400) OR status_code >= 600 OR status_code = -1")
 	}
 	switch filter.Mode {
 	case "stream":

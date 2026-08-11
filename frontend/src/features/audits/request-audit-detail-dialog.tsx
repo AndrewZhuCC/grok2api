@@ -23,6 +23,11 @@ const PRE_UPSTREAM_ERROR_CODES = new Set([
   "upstream_unavailable",
 ]);
 
+function isQualityGuardError(errorCode?: string, statusCode?: number): boolean {
+  if (statusCode === -1) return true;
+  return typeof errorCode === "string" && errorCode.startsWith("stream_degraded_");
+}
+
 export function RequestAuditDetailDialog({ audit, open, onOpenChange }: { audit: AuditDTO | null; open: boolean; onOpenChange: (open: boolean) => void }) {
   const { t, i18n } = useTranslation();
   const [selectedNumber, setSelectedNumber] = useState<number | null>(null);
@@ -70,7 +75,12 @@ export function RequestAuditDetailDialog({ audit, open, onOpenChange }: { audit:
           ) : (
             <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
               <TriangleAlert className="size-7 stroke-1" />
-              <p>{t(detailQuery.data.audit.errorCode && PRE_UPSTREAM_ERROR_CODES.has(detailQuery.data.audit.errorCode) ? "audits.noUpstreamAttempt" : "audits.noFailureAttempts")}</p>
+              <p>
+                {isQualityGuardError(detailQuery.data.audit.errorCode, detailQuery.data.audit.statusCode)
+                  ? t("audits.qualityGuardInterruptHint")
+                  : t(detailQuery.data.audit.errorCode && PRE_UPSTREAM_ERROR_CODES.has(detailQuery.data.audit.errorCode) ? "audits.noUpstreamAttempt" : "audits.noFailureAttempts")}
+              </p>
+              {detailQuery.data.audit.statusCode === -1 ? <span className="font-medium text-violet-700 dark:text-violet-300">-1 · {t("audits.qualityGuardInterrupt")}</span> : null}
               {detailQuery.data.audit.errorCode ? <span className="max-w-full break-words">{detailQuery.data.audit.errorCode}</span> : null}
             </div>
           )

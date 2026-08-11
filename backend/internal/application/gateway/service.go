@@ -1295,7 +1295,13 @@ attemptLoop:
 				record := auditBase
 				record.AccountID = &accountID
 				record.AccountName = credential.Name
+				// Quality-guard interrupts keep a dedicated audit status so the
+				// request list can show them without looking like a normal 200.
+				// HTTP transport status stays 2xx; business outcome is -1.
 				record.StatusCode = response.StatusCode
+				if isQualityGuardInterrupt(errorCode) {
+					record.StatusCode = audit.StatusQualityGuardInterrupt
+				}
 				record.InputTokens = usage.InputTokens
 				record.CachedInputTokens = usage.CachedInputTokens
 				record.OutputTokens = usage.OutputTokens
@@ -1442,6 +1448,15 @@ func isUpstreamStreamFailure(errorCode string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func isQualityGuardInterrupt(errorCode string) bool {
+	switch errorCode {
+	case "stream_degraded_content_without_thinking", "stream_degraded_exhausted":
+		return true
+	default:
+		return strings.HasPrefix(errorCode, "stream_degraded_")
 	}
 }
 

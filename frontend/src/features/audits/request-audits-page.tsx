@@ -228,6 +228,7 @@ export function RequestAuditsPage() {
                   { value: "4xx", label: `4xx · ${t("audits.statusClientError")}` },
                   { value: "5xx", label: `5xx · ${t("audits.statusServerError")}` },
                   { value: "other", label: t("audits.statusOtherError") },
+                  // "other" already includes status -1 / stream_degraded; label stays generic.
                 ] },
                 { id: "mode", label: t("audits.mode"), value: modeFilter, onChange: setModeFilter, options: [
                   { value: "stream", label: t("audits.stream") },
@@ -629,11 +630,13 @@ function MediaUsage({ input, output }: { input: string; output: string }) {
 }
 
 function StatusCode({ statusCode, hasError = false }: { statusCode: number; hasError?: boolean }) {
+  const { t } = useTranslation();
   const tone = statusTone(statusCode, hasError);
+  const label = statusCode === -1 ? `-1 · ${t("audits.qualityGuardInterrupt")}` : String(statusCode || "-");
   return (
     <span className={cn("inline-flex items-center gap-1.5 text-xs tabular-nums", tone.text)}>
       <span className={cn("size-1.5 rounded-full", tone.dot)} />
-      {statusCode || "-"}
+      {label}
     </span>
   );
 }
@@ -642,12 +645,18 @@ function AuditStatus({ audit, onOpen }: { audit: AuditDTO; onOpen: () => void })
   const { t } = useTranslation();
   const mode = audit.operation === "compaction" ? t("audits.operations.compaction") : audit.streaming ? t("audits.stream") : t("audits.nonStream");
   const hasError = Boolean(audit.errorCode);
+  const isQualityGuard = audit.statusCode === -1 || (typeof audit.errorCode === "string" && audit.errorCode.startsWith("stream_degraded_"));
   // 保留真实 HTTP 状态，同时明确标识 2xx 响应头之后发生的流式失败。
-  // statusCode 0 仅兼容曾运行过早期实现的开发数据库。
-  const showErrorLabel = hasError && (audit.statusCode === 0 || (audit.statusCode >= 200 && audit.statusCode < 300));
+  // statusCode 0 仅兼容曾运行过早期实现的开发数据库；-1 为质量守护打断。
+  const showErrorLabel = !isQualityGuard && hasError && (audit.statusCode === 0 || (audit.statusCode >= 200 && audit.statusCode < 300));
   const content = (
     <>
-      {showErrorLabel ? (
+      {isQualityGuard ? (
+        <span className="inline-flex items-center gap-1.5 text-xs tabular-nums text-violet-700 dark:text-violet-300">
+          <span className="size-1.5 rounded-full bg-violet-500" />
+          {`-1 · ${t("audits.qualityGuardInterrupt")}`}
+        </span>
+      ) : showErrorLabel ? (
         <span className="inline-flex items-center gap-1.5 text-xs tabular-nums text-amber-700 dark:text-amber-300">
           <span className="size-1.5 rounded-full bg-amber-500" />
           {audit.statusCode > 0 ? `${audit.statusCode} · ` : ""}{t("audits.errorLabel")}
@@ -672,6 +681,7 @@ function AuditStatus({ audit, onOpen }: { audit: AuditDTO; onOpen: () => void })
 }
 
 function statusTone(statusCode: number, hasError = false): { dot: string; text: string } {
+  if (statusCode === -1) return { dot: "bg-violet-500", text: "text-violet-700 dark:text-violet-300" };
   if (hasError) return { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-300" };
   if (statusCode >= 500) return { dot: "bg-red-500", text: "text-red-700 dark:text-red-300" };
   if (statusCode >= 400) return { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-300" };
