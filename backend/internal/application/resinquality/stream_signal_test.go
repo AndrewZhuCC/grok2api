@@ -83,6 +83,7 @@ func TestPreflightResponsesEmptyReasoningShellThenContentDegraded(t *testing.T) 
 		`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1"}}`,
 		``,
 		`data: {"type":"response.output_text.delta","delta":"hello without think"}`,
+		`data: {"type":"response.completed"}`,
 		``,
 	}, "\n")
 	v, err := PreflightStream(strings.NewReader(body), StreamProtocolResponses, time.Second)
@@ -103,6 +104,7 @@ func TestPreflightAnthropicEmptyThinkingShellThenTextDegraded(t *testing.T) {
 		`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
 		``,
 		`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}`,
+		`data: {"type":"message_stop"}`,
 		``,
 	}, "\n")
 	v, err := PreflightStream(strings.NewReader(body), StreamProtocolAnthropic, time.Second)
@@ -176,13 +178,14 @@ func TestPreflightSkipsToolThenContentIsDegraded(t *testing.T) {
 		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{"}}]}}]}`,
 		``,
 		`data: {"choices":[{"delta":{"content":"no think"}}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
 		``,
 	}, "\n")
 	v, err := PreflightStream(strings.NewReader(body), StreamProtocolChat, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !v.Degraded || v.Reason != "content_without_thinking" {
+	if v.Degraded || v.Reason != "content_then_tool" {
 		t.Fatalf("verdict=%+v", v)
 	}
 }
@@ -198,7 +201,7 @@ func TestPreflightSkipsToolThenThinkingHealthy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.Degraded || v.FirstSignal != SignalThinking {
+	if v.Degraded || v.Reason != "thinking_present" {
 		t.Fatalf("verdict=%+v", v)
 	}
 }

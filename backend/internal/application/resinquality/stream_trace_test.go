@@ -43,6 +43,7 @@ func TestPreflightTraceOnDegradedResponsesStream(t *testing.T) {
 		`data: {"type":"response.created"}`,
 		`data: {"type":"response.output_item.added","item":{"type":"message"}}`,
 		`data: {"type":"response.output_text.delta","delta":"answer"}`,
+		`data: {"type":"response.completed"}`,
 		"",
 	}, "\n")
 
@@ -53,7 +54,7 @@ func TestPreflightTraceOnDegradedResponsesStream(t *testing.T) {
 	if !v.Degraded || v.Reason != "content_without_thinking" {
 		t.Fatalf("verdict = %+v, want degraded content_without_thinking", v)
 	}
-	want := "response.created>response.output_item.added:message>response.output_text.delta"
+	want := "response.created>response.output_item.added:message>response.output_text.delta>response.completed"
 	if got := strings.Join(v.EventTrace, ">"); got != want {
 		t.Fatalf("event_trace = %q, want %q", got, want)
 	}
@@ -87,6 +88,7 @@ func TestPreflightTraceReportsChatDeltaFieldsAndEmptiness(t *testing.T) {
 	source := strings.Join([]string{
 		`data: {"choices":[{"delta":{"reasoning":""}}]}`,
 		`data: {"choices":[{"delta":{"content":"hello"}}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
 		"",
 	}, "\n")
 
@@ -97,7 +99,7 @@ func TestPreflightTraceReportsChatDeltaFieldsAndEmptiness(t *testing.T) {
 	if !v.Degraded || v.Reason != "content_without_thinking" {
 		t.Fatalf("verdict = %+v, want degraded content_without_thinking", v)
 	}
-	want := "reasoning(empty)>content"
+	want := "reasoning(empty)>content>empty_delta"
 	if got := strings.Join(v.EventTrace, ">"); got != want {
 		t.Fatalf("event_trace = %q, want %q", got, want)
 	}

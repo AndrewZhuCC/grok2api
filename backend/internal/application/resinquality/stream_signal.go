@@ -282,8 +282,8 @@ func classifyAnthropicEvent(data []byte) string {
 
 func classifyResponsesEvent(data []byte) string {
 	var event struct {
-		Type  string `json:"type"`
-		Delta string `json:"delta"`
+		Type  string          `json:"type"`
+		Delta json.RawMessage `json:"delta"`
 		Item  struct {
 			Type string `json:"type"`
 		} `json:"item"`
@@ -291,13 +291,14 @@ func classifyResponsesEvent(data []byte) string {
 	if json.Unmarshal(data, &event) != nil {
 		return SignalNone
 	}
+	delta := responsesDeltaText(event.Delta)
 	switch event.Type {
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-		if strings.TrimSpace(event.Delta) != "" {
+		if delta != "" {
 			return SignalThinking
 		}
 	case "response.output_text.delta", "response.refusal.delta":
-		if strings.TrimSpace(event.Delta) != "" {
+		if delta != "" {
 			return SignalContent
 		}
 	case "response.output_item.added", "response.output_item.done":
@@ -316,6 +317,41 @@ func classifyResponsesEvent(data []byte) string {
 		return SignalTool
 	}
 	return SignalNone
+}
+
+// responsesDeltaText accepts both official string deltas and object-shaped
+// payloads some Grok 4.6 builds emit ({"text":"..."}). Empty shells stay blank.
+func terminalReason(sawThinking, sawTool, sawContent bool) string {
+	switch {
+	case sawThinking:
+		return "thinking_present"
+	case sawTool && sawContent:
+		return "content_then_tool"
+	case sawTool:
+		return "tool_only_stream"
+	case sawContent:
+		return "content_without_thinking"
+	default:
+		return "stream_completed_before_signal"
+	}
+}
+
+func responsesDeltaText(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return strings.TrimSpace(text)
+	}
+	var object struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &object) == nil {
+		return strings.TrimSpace(object.Text)
+	}
+	return ""
 }
 
 // isStreamTerminalEvent reports whether a payload ends the reply, meaning no
@@ -376,6 +412,7 @@ func PreflightStream(source io.Reader, protocol string, timeout time.Duration) (
 	chunk := make([]byte, 32<<10)
 	sawThinking := false
 	sawTool := false
+	sawContent := false
 	verdict := StreamWatchVerdict{FirstSignal: SignalNone}
 	trace := make([]string, 0, 8)
 	dataFrames := 0
@@ -388,11 +425,15 @@ func PreflightStream(source io.Reader, protocol string, timeout time.Duration) (
 		if reason != "" {
 			verdict.Reason = reason
 		}
+		verdict.Degraded = reason == "content_without_thinking"
 		return verdict
 	}
 
 	for {
 		if time.Now().After(deadline) {
+			if sawContent || sawTool || sawThinking {
+				return finish(terminalReason(sawThinking, sawTool, sawContent)), nil
+			}
 			// Timeout with no semantic signal: treat as non-degraded (don't false-positive).
 			return finish("preflight_timeout"), nil
 		}
@@ -424,40 +465,49 @@ func PreflightStream(source io.Reader, protocol string, timeout time.Duration) (
 				// thinking/content signal that can no longer arrive just burns
 				// wall time — tool-only turns were stalling here for 30-40s.
 				if isStreamTerminalEvent(payload, protocol) {
-					if sawTool {
-						return finish("tool_only_stream"), nil
-					}
-					return finish("stream_completed_before_signal"), nil
+					return finish(terminalReason(sawThinking, sawTool, sawContent)), nil
 				}
 				kind := ClassifyStreamData(payload, protocol)
 				switch kind {
 				case SignalNone:
 					continue
 				case SignalTool:
-					// Tools alone are not a verdict: a reply may still produce
-					// thinking or content afterwards, and content with no prior
-					// thinking stays degraded even when tools came first.
+					// Grok 4.6 often emits a short visible preface, then a
+					// function call. That is a tool turn, not a degraded
+					// final answer. Keep watching until thinking or the
+					// terminal event decides the request.
 					sawTool = true
+					if verdict.FirstSignal == SignalNone {
+						verdict.FirstSignal = SignalTool
+					}
 					continue
 				case SignalThinking:
 					sawThinking = true
-					verdict.FirstSignal = SignalThinking
+					if verdict.FirstSignal == SignalNone {
+						verdict.FirstSignal = SignalThinking
+					}
 					return finish("thinking_present"), nil
 				case SignalContent:
-					verdict.FirstSignal = SignalContent
-					if sawThinking {
-						return finish("content_after_thinking"), nil
+					sawContent = true
+					if verdict.FirstSignal == SignalNone {
+						verdict.FirstSignal = SignalContent
 					}
-					verdict.Degraded = true
-					return finish("content_without_thinking"), nil
+					// Do not interrupt on the first content token. 4.6 tool
+					// turns commonly leak a preface before the function call.
+					continue
 				default:
-					verdict.FirstSignal = kind
+					if verdict.FirstSignal == SignalNone {
+						verdict.FirstSignal = kind
+					}
 					return finish("other_signal"), nil
 				}
 			}
 		}
 		if readErr != nil {
 			if readErr == io.EOF {
+				if sawContent || sawTool || sawThinking {
+					return finish(terminalReason(sawThinking, sawTool, sawContent)), nil
+				}
 				return finish("stream_eof_before_signal"), nil
 			}
 			return finish(""), readErr
