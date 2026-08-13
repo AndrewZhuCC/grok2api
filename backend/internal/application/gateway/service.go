@@ -1731,14 +1731,28 @@ func parseFreeQuotaExhaustion(body []byte) (int64, int64, bool) {
 type finalizingBody struct {
 	io.ReadCloser
 	finalize func()
+	// suppressFinalize disables the default audit write on Close.
+	suppressFinalize bool
 }
 
 func (b *finalizingBody) Close() error {
 	err := b.ReadCloser.Close()
-	if b.finalize != nil {
+	if b.finalize != nil && !b.suppressFinalize {
 		b.finalize()
 	}
 	return err
+}
+
+// SuppressCloseFinalize stops Close from writing the default "stream_closed"
+// audit, so a caller that already knows the real outcome can record it instead.
+//
+// The audit finalizer is guarded by sync.Once: whichever call lands first wins.
+// Without this, closing the body to abort a stream consumed the Once and the
+// caller's own Finalize became a silent no-op.
+func SuppressCloseFinalize(body io.ReadCloser) {
+	if wrapper, ok := body.(*finalizingBody); ok {
+		wrapper.suppressFinalize = true
+	}
 }
 
 // shouldStopForNonAccountFingerprint 仅对非账号归因故障累计指纹并在达到阈值后停止换号。

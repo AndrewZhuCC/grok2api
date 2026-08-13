@@ -76,8 +76,13 @@ export function listModelGroups(input: ListModelsInput): Promise<PaginatedDTO<Mo
   return apiRequest(`/api/admin/v1/models/groups?${query}`, {}, decodeModelGroupPage);
 }
 
-export function syncModels(): Promise<{ synced: number }> {
-  return apiRequest("/api/admin/v1/models/sync", { method: "POST" }, decodeCountResult<{ synced: number }>("synced"));
+export function syncModels(): Promise<{ accepted?: boolean; started?: boolean; accounts?: number; synced: number }> {
+  return apiRequest("/api/admin/v1/models/sync", { method: "POST" }, createObjectDecoder("model sync", {
+    accepted: isOptional(isBoolean),
+    started: isOptional(isBoolean),
+    accounts: isOptional(isNumber),
+    synced: isNumber,
+  }));
 }
 
 export type ModelAccountOptionDTO = { id: string; name: string };

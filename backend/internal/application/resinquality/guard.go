@@ -183,6 +183,50 @@ func (g *Guard) RecordStreamWatch(verdict StreamWatchVerdict, attempt int) {
 	})
 }
 
+// LogStreamVerdict emits one diagnostic line per preflight verdict, including the
+// pass-through ones (thinking_present, preflight_timeout, stream_eof_before_signal).
+// Without it, a request that passes preflight on its first attempt leaves no trace,
+// so the share of timeout/EOF pass-throughs across all traffic is unknowable.
+// EventTrace carries only SSE event type names, never delta text.
+func (g *Guard) LogStreamVerdict(degraded bool, meta StreamDegradedMeta) {
+	if g == nil || g.log == nil {
+		return
+	}
+	g.log.Info("stream_watch_verdict",
+		"degraded", degraded,
+		"reason", meta.Reason,
+		"first_signal", meta.FirstSignal,
+		"request_id", meta.RequestID,
+		"account_id", meta.AccountID,
+		"account_name", meta.AccountName,
+		"model", meta.Model,
+		"protocol", meta.Protocol,
+		"provider", meta.Provider,
+		"peek_ms", meta.PeekMS,
+		"attempt", meta.Attempt,
+		"max_attempts", meta.MaxAttempts,
+		"data_frames", meta.DataFrames,
+		"event_trace", strings.Join(meta.EventTrace, ">"),
+	)
+}
+
+// LogStreamWatchSkipped records a streaming reply that bypassed preflight, so
+// traffic showing no verdict can be attributed to a specific gate instead of
+// being mistaken for a guard failure. Routing facts only; no user payload.
+func (g *Guard) LogStreamWatchSkipped(reason, requestID, protocol, provider, model string, status int) {
+	if g == nil || g.log == nil {
+		return
+	}
+	g.log.Debug("stream_watch_skipped",
+		"reason", reason,
+		"request_id", requestID,
+		"protocol", protocol,
+		"provider", provider,
+		"model", model,
+		"status", status,
+	)
+}
+
 // RecordStreamRetryIssued bumps the retried counter when a reshuffle+re-request is started.
 func (g *Guard) RecordStreamRetryIssued() {
 	if g == nil {
@@ -267,6 +311,11 @@ type StreamDegradedMeta struct {
 	Attempt      int // 1-based attempt that produced this verdict
 	MaxAttempts  int
 	AttemptsUsed int // final attempts used when recording cycle outcome
+	// EventTrace is the ordered SSE event type names seen during preflight
+	// (consecutive duplicates collapsed). Diagnostics only — no user payload.
+	EventTrace []string
+	// DataFrames counts preflighted "data:" frames, including unclassified ones.
+	DataFrames int
 }
 
 // HandleStreamDegraded clears the Resin pool after a content-without-thinking hit.
@@ -293,6 +342,8 @@ func (g *Guard) HandleStreamDegraded(ctx context.Context, meta StreamDegradedMet
 		"max_attempts", meta.MaxAttempts,
 		"cleared", cleared,
 		"provider", meta.Provider,
+		"data_frames", meta.DataFrames,
+		"event_trace", strings.Join(meta.EventTrace, ">"),
 	}
 	if err != nil {
 		logArgs = append(logArgs, "error", err.Error())

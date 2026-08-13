@@ -140,6 +140,100 @@ func TestSyncAggregatesCapabilitiesFromAllAccounts(t *testing.T) {
 	}
 }
 
+func TestStartSyncContinuesAfterCallerCancel(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "model-sync-background.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cipher.Encrypt("access-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	first, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderBuild, Name: "slow-one", SourceKey: "slow-one", EncryptedAccessToken: encrypted, ExpiresAt: time.Now().Add(time.Hour), AuthStatus: account.AuthStatusActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{Provider: account.ProviderBuild, Name: "slow-two", SourceKey: "slow-two", EncryptedAccessToken: encrypted, ExpiresAt: time.Now().Add(time.Hour), AuthStatus: account.AuthStatusActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &modelCapabilityAdapter{
+		models: map[uint64][]string{
+			first.ID:  {"grok-4.6"},
+			second.ID: {"grok-4.6"},
+		},
+		entered: make(chan struct{}, 2),
+		release: make(chan struct{}),
+	}
+	registry := provider.NewRegistry(adapter)
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, nil)
+	service := NewService(modelRepo, accountRepo, accountService, registry)
+
+	requestCtx, cancel := context.WithCancel(ctx)
+	startedCh := make(chan modelappSyncStartResult, 1)
+	go func() {
+		started, syncErr := service.StartSync(requestCtx)
+		startedCh <- modelappSyncStartResult{started: started, err: syncErr}
+	}()
+	select {
+	case <-adapter.entered:
+	case <-time.After(time.Second):
+		close(adapter.release)
+		t.Fatal("sync did not start before cancel")
+	}
+	cancel()
+	select {
+	case result := <-startedCh:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if !result.started.Accepted || result.started.Synced != 0 {
+			t.Fatalf("started = %#v", result.started)
+		}
+	case <-time.After(time.Second):
+		close(adapter.release)
+		t.Fatal("canceled caller did not return")
+	}
+	close(adapter.release)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		candidates, listErr := accountRepo.ListRoutingCandidates(ctx, account.ProviderBuild, 0, "grok-4.6", "")
+		if listErr != nil {
+			t.Fatal(listErr)
+		}
+		supported := 0
+		for _, candidate := range candidates {
+			if candidate.ModelCapabilityKnown && candidate.SupportsModel {
+				supported++
+			}
+		}
+		if supported == 2 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("background sync did not finish after caller cancel")
+}
+
+type modelappSyncStartResult struct {
+	started SyncStart
+	err     error
+}
+
 func TestSyncAccountNormalizesBuildVideo15ByBillingSuper(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "model-build-video15.db"))

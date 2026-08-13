@@ -234,12 +234,22 @@ func (h *Handler) batchDelete(c *gin.Context) {
 }
 
 func (h *Handler) sync(c *gin.Context) {
-	count, err := h.service.Sync(c.Request.Context())
+	started, err := h.service.StartSync(c.Request.Context())
 	if err != nil {
-		response.Error(c, http.StatusBadGateway, "modelSyncFailed", "同步上游模型失败")
+		if c.Request.Context().Err() != nil {
+			return
+		}
+		h.writeServiceError(c, "modelSyncFailed", err)
 		return
 	}
-	response.Success(c, http.StatusOK, gin.H{"synced": count})
+	if c.Request.Context().Err() != nil {
+		return
+	}
+	if started.Accepted && started.Synced == 0 {
+		response.Success(c, http.StatusAccepted, gin.H{"accepted": true, "started": true, "accounts": started.AccountN, "synced": 0})
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"accepted": true, "started": started.Started, "accounts": started.AccountN, "synced": started.Synced})
 }
 
 func (h *Handler) update(c *gin.Context) {

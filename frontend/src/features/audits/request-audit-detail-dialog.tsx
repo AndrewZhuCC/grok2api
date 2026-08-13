@@ -23,9 +23,11 @@ const PRE_UPSTREAM_ERROR_CODES = new Set([
   "upstream_unavailable",
 ]);
 
+// 质量守护打断以 error_code 前缀识别。打断记为 599（数据库约束 100..599），
+// 状态码与真实 5xx 无法区分，故不能作为判据；-1 仅兼容历史记录。
 function isQualityGuardError(errorCode?: string, statusCode?: number): boolean {
-  if (statusCode === -1) return true;
-  return typeof errorCode === "string" && errorCode.startsWith("stream_degraded_");
+  if (typeof errorCode === "string" && errorCode.startsWith("stream_degraded_")) return true;
+  return statusCode === -1;
 }
 
 export function RequestAuditDetailDialog({ audit, open, onOpenChange }: { audit: AuditDTO | null; open: boolean; onOpenChange: (open: boolean) => void }) {
@@ -80,7 +82,7 @@ export function RequestAuditDetailDialog({ audit, open, onOpenChange }: { audit:
                   ? t("audits.qualityGuardInterruptHint")
                   : t(detailQuery.data.audit.errorCode && PRE_UPSTREAM_ERROR_CODES.has(detailQuery.data.audit.errorCode) ? "audits.noUpstreamAttempt" : "audits.noFailureAttempts")}
               </p>
-              {detailQuery.data.audit.statusCode === -1 ? <span className="font-medium text-violet-700 dark:text-violet-300">-1 · {t("audits.qualityGuardInterrupt")}</span> : null}
+              {isQualityGuardError(detailQuery.data.audit.errorCode, detailQuery.data.audit.statusCode) ? <span className="font-medium text-violet-700 dark:text-violet-300">{t("audits.qualityGuardInterrupt")}</span> : null}
               {detailQuery.data.audit.errorCode ? <span className="max-w-full break-words">{detailQuery.data.audit.errorCode}</span> : null}
             </div>
           )

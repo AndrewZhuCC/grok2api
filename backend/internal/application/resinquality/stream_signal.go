@@ -36,6 +36,153 @@ type StreamWatchVerdict struct {
 	Buffered []byte
 	// PeekMS is how long preflight waited for the first semantic signal.
 	PeekMS int64
+	// EventTrace lists the SSE event type names seen during preflight, in order,
+	// with consecutive duplicates collapsed. Diagnostics only: it never carries
+	// delta text, tool arguments, or any other user payload.
+	EventTrace []string
+	// DataFrames counts "data:" frames consumed during preflight, including the
+	// ones classified as SignalNone. A high count with an empty EventTrace means
+	// the payloads parsed but carried no recognized event type.
+	DataFrames int
+}
+
+// maxEventTraceEntries bounds the diagnostic trace so a chatty stream cannot
+// grow the verdict without limit. Overflow is reported via the truncation marker.
+const maxEventTraceEntries = 24
+
+// eventTraceTruncated marks a trace that hit maxEventTraceEntries.
+const eventTraceTruncated = "…"
+
+// streamEventName extracts only the discriminator field of an SSE payload for
+// diagnostics: Responses uses "type", Anthropic uses "type", Chat has none and
+// is reported by its delta field names. No user content is read.
+func streamEventName(data []byte, protocol string) string {
+	switch protocol {
+	case StreamProtocolChat:
+		return chatDeltaFieldName(data)
+	default:
+		// Delta stays raw: Anthropic sends an object, Responses sends a string.
+		// Decoding it into a fixed shape would fail the whole payload and report
+		// every Responses delta as unparsable.
+		var event struct {
+			Type         string `json:"type"`
+			ContentBlock struct {
+				Type string `json:"type"`
+			} `json:"content_block"`
+			Delta json.RawMessage `json:"delta"`
+			Item  struct {
+				Type string `json:"type"`
+			} `json:"item"`
+		}
+		if json.Unmarshal(data, &event) != nil {
+			return "unparsable"
+		}
+		name := strings.TrimSpace(event.Type)
+		if name == "" {
+			return "no_type"
+		}
+		// Qualify the container events whose meaning depends on a nested type,
+		// so the trace distinguishes e.g. an empty thinking shell from text.
+		switch name {
+		case "content_block_start", "content_block_stop":
+			if inner := strings.TrimSpace(event.ContentBlock.Type); inner != "" {
+				return name + ":" + inner
+			}
+		case "content_block_delta":
+			if inner := deltaTypeName(event.Delta); inner != "" {
+				return name + ":" + inner
+			}
+		case "response.output_item.added", "response.output_item.done":
+			if inner := strings.TrimSpace(event.Item.Type); inner != "" {
+				return name + ":" + inner
+			}
+		}
+		return name
+	}
+}
+
+// deltaTypeName reads the nested delta discriminator when the delta is an object
+// (Anthropic). A string delta (Responses) has no inner type and yields "".
+func deltaTypeName(raw json.RawMessage) string {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return ""
+	}
+	var inner struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &inner) != nil {
+		return ""
+	}
+	return strings.TrimSpace(inner.Type)
+}
+
+// chatDeltaFieldName reports which delta fields are present in a Chat chunk.
+// Only field presence is inspected; values are never copied into the trace.
+func chatDeltaFieldName(data []byte) string {
+	var event struct {
+		Choices []struct {
+			Delta struct {
+				Content          *string         `json:"content"`
+				Reasoning        *string         `json:"reasoning"`
+				ReasoningContent *string         `json:"reasoning_content"`
+				Refusal          *string         `json:"refusal"`
+				ToolCalls        json.RawMessage `json:"tool_calls"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(data, &event) != nil {
+		return "unparsable"
+	}
+	if len(event.Choices) == 0 {
+		return "no_choices"
+	}
+	d := event.Choices[0].Delta
+	fields := make([]string, 0, 4)
+	if len(bytes.TrimSpace(d.ToolCalls)) > 0 && !bytes.Equal(bytes.TrimSpace(d.ToolCalls), []byte("null")) {
+		fields = append(fields, "tool_calls")
+	}
+	if d.Reasoning != nil {
+		fields = append(fields, emptyQualifiedField("reasoning", *d.Reasoning))
+	}
+	if d.ReasoningContent != nil {
+		fields = append(fields, emptyQualifiedField("reasoning_content", *d.ReasoningContent))
+	}
+	if d.Content != nil {
+		fields = append(fields, emptyQualifiedField("content", *d.Content))
+	}
+	if d.Refusal != nil {
+		fields = append(fields, emptyQualifiedField("refusal", *d.Refusal))
+	}
+	if len(fields) == 0 {
+		return "empty_delta"
+	}
+	return strings.Join(fields, "+")
+}
+
+// emptyQualifiedField reports a field name plus whether it was blank, which is
+// what distinguishes a real signal from an empty shell. The value is not copied.
+func emptyQualifiedField(name, value string) string {
+	if strings.TrimSpace(value) == "" {
+		return name + "(empty)"
+	}
+	return name
+}
+
+// appendTrace records an event name, collapsing consecutive duplicates so a long
+// delta run stays one entry, and stops growing at maxEventTraceEntries.
+func appendTrace(trace []string, name string) []string {
+	if name == "" {
+		return trace
+	}
+	if n := len(trace); n > 0 {
+		if trace[n-1] == name || trace[n-1] == eventTraceTruncated {
+			return trace
+		}
+	}
+	if len(trace) >= maxEventTraceEntries {
+		return append(trace, eventTraceTruncated)
+	}
+	return append(trace, name)
 }
 
 // ClassifyStreamData classifies one SSE data payload (without the "data:" prefix).
@@ -171,6 +318,47 @@ func classifyResponsesEvent(data []byte) string {
 	return SignalNone
 }
 
+// isStreamTerminalEvent reports whether a payload ends the reply, meaning no
+// thinking or content signal can still arrive. Used to cut preflight short
+// instead of blocking until EOF or the timeout.
+func isStreamTerminalEvent(data []byte, protocol string) bool {
+	data = bytes.TrimSpace(data)
+	if bytes.Equal(data, []byte("[DONE]")) {
+		return true
+	}
+	switch protocol {
+	case StreamProtocolChat:
+		// Chat marks completion with a finish_reason on the choice.
+		var event struct {
+			Choices []struct {
+				FinishReason *string `json:"finish_reason"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal(data, &event) != nil {
+			return false
+		}
+		for _, choice := range event.Choices {
+			if choice.FinishReason != nil && strings.TrimSpace(*choice.FinishReason) != "" {
+				return true
+			}
+		}
+		return false
+	default:
+		var event struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(data, &event) != nil {
+			return false
+		}
+		switch strings.TrimSpace(event.Type) {
+		case "response.completed", "response.incomplete", "response.failed",
+			"message_stop", "error":
+			return true
+		}
+		return false
+	}
+}
+
 // PreflightStream reads from source until the first semantic signal (or timeout/EOF),
 // buffering all consumed bytes. Tool signals are skipped. Content-without-thinking is degraded.
 //
@@ -187,15 +375,26 @@ func PreflightStream(source io.Reader, protocol string, timeout time.Duration) (
 	pending := make([]byte, 0, 4096)
 	chunk := make([]byte, 32<<10)
 	sawThinking := false
+	sawTool := false
 	verdict := StreamWatchVerdict{FirstSignal: SignalNone}
+	trace := make([]string, 0, 8)
+	dataFrames := 0
+	// finish stamps the diagnostic fields shared by every return path.
+	finish := func(reason string) StreamWatchVerdict {
+		verdict.Buffered = buf.Bytes()
+		verdict.PeekMS = time.Since(started).Milliseconds()
+		verdict.EventTrace = trace
+		verdict.DataFrames = dataFrames
+		if reason != "" {
+			verdict.Reason = reason
+		}
+		return verdict
+	}
 
 	for {
 		if time.Now().After(deadline) {
-			verdict.Buffered = buf.Bytes()
-			verdict.PeekMS = time.Since(started).Milliseconds()
 			// Timeout with no semantic signal: treat as non-degraded (don't false-positive).
-			verdict.Reason = "preflight_timeout"
-			return verdict, nil
+			return finish("preflight_timeout"), nil
 		}
 		// Best-effort deadline via short reads isn't possible on plain Reader;
 		// rely on upstream/request context closing the body. We still bound wall time
@@ -209,10 +408,7 @@ func PreflightStream(source io.Reader, protocol string, timeout time.Duration) (
 				if idx < 0 {
 					if len(pending) > 8<<20 {
 						// Pathological line — give up watching, pass through.
-						verdict.Buffered = buf.Bytes()
-						verdict.PeekMS = time.Since(started).Milliseconds()
-						verdict.Reason = "preflight_line_too_long"
-						return verdict, nil
+						return finish("preflight_line_too_long"), nil
 					}
 					break
 				}
@@ -222,48 +418,49 @@ func PreflightStream(source io.Reader, protocol string, timeout time.Duration) (
 					continue
 				}
 				payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+				dataFrames++
+				trace = appendTrace(trace, streamEventName(payload, protocol))
+				// A terminal event means the reply is over. Waiting for a
+				// thinking/content signal that can no longer arrive just burns
+				// wall time — tool-only turns were stalling here for 30-40s.
+				if isStreamTerminalEvent(payload, protocol) {
+					if sawTool {
+						return finish("tool_only_stream"), nil
+					}
+					return finish("stream_completed_before_signal"), nil
+				}
 				kind := ClassifyStreamData(payload, protocol)
 				switch kind {
 				case SignalNone:
 					continue
 				case SignalTool:
-					// Ignore tools; keep watching for thinking/content.
+					// Tools alone are not a verdict: a reply may still produce
+					// thinking or content afterwards, and content with no prior
+					// thinking stays degraded even when tools came first.
+					sawTool = true
 					continue
 				case SignalThinking:
 					sawThinking = true
 					verdict.FirstSignal = SignalThinking
-					verdict.Buffered = buf.Bytes()
-					verdict.PeekMS = time.Since(started).Milliseconds()
-					verdict.Reason = "thinking_present"
-					return verdict, nil
+					return finish("thinking_present"), nil
 				case SignalContent:
 					verdict.FirstSignal = SignalContent
-					verdict.Buffered = buf.Bytes()
-					verdict.PeekMS = time.Since(started).Milliseconds()
 					if sawThinking {
-						verdict.Reason = "content_after_thinking"
-						return verdict, nil
+						return finish("content_after_thinking"), nil
 					}
 					verdict.Degraded = true
-					verdict.Reason = "content_without_thinking"
-					return verdict, nil
+					return finish("content_without_thinking"), nil
 				default:
 					verdict.FirstSignal = kind
-					verdict.Buffered = buf.Bytes()
-					verdict.PeekMS = time.Since(started).Milliseconds()
-					verdict.Reason = "other_signal"
-					return verdict, nil
+					return finish("other_signal"), nil
 				}
 			}
 		}
 		if readErr != nil {
-			verdict.Buffered = buf.Bytes()
-			verdict.PeekMS = time.Since(started).Milliseconds()
 			if readErr == io.EOF {
-				verdict.Reason = "stream_eof_before_signal"
-				return verdict, nil
+				return finish("stream_eof_before_signal"), nil
 			}
-			return verdict, readErr
+			return finish(""), readErr
 		}
 	}
 }

@@ -16,8 +16,15 @@ const (
 
 // StatusQualityGuardInterrupt is the dedicated request-audit status for streams
 // interrupted by the in-process Resin quality guard (content without thinking).
-// It is not an HTTP status; the transport may still have received 2xx headers.
-const StatusQualityGuardInterrupt = -1
+// It is not a status the transport observed; upstream may well have sent 2xx
+// headers before the stream was aborted.
+//
+// The value must satisfy the request_audits CHECK constraint (100..599), so a
+// sentinel like -1 cannot be stored. 599 is used because it is outside the range
+// any upstream returns, while still landing in the 5xx bucket that already means
+// "this request did not deliver a usable answer". The reliable discriminator is
+// the paired error_code prefix stream_degraded_, not the number alone.
+const StatusQualityGuardInterrupt = 599
 
 type UsageSource string
 

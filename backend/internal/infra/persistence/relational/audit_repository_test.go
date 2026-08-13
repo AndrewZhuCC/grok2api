@@ -538,4 +538,71 @@ func TestAuditRepositoryStreamFailureKeepsHTTPStatusAndFiltersAsOther(t *testing
 	}
 }
 
+// Regression for quality-guard audit persistence. The database enforces
+// status_code BETWEEN 100 AND 599; using an out-of-range sentinel made every
+// interrupt batch retry until the billing ledger entered degraded/enforce mode.
+func TestAuditRepositoryStoresQualityGuardInterruptWithinConstraint(t *testing.T) {
+	ctx := context.Background()
+	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "audit-quality-guard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	repository := NewAuditRepository(database)
+	now := time.Now().UTC()
+	record := audit.Record{
+		EventID: "evt_quality_guard_interrupt_0001", RequestID: "quality-guard-interrupt",
+		ClientKeyID: 1, ModelRouteID: 1, ModelPublicID: "grok-4.5",
+		Provider: "grok_build", Operation: audit.OperationResponses,
+		StatusCode: audit.StatusQualityGuardInterrupt, Streaming: true,
+		ErrorCode: "stream_degraded_content_without_thinking", CreatedAt: now,
+	}
+	if err := repository.Create(ctx, record); err != nil {
+		t.Fatalf("quality-guard audit must satisfy the database constraint: %v", err)
+	}
+
+	items, _, err := repository.ListCursor(ctx, repositorypkg.AuditCursorQuery{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("stored audits = %d, want 1", len(items))
+	}
+	stored := items[0]
+	if stored.StatusCode != audit.StatusQualityGuardInterrupt {
+		t.Fatalf("stored status = %d, want %d", stored.StatusCode, audit.StatusQualityGuardInterrupt)
+	}
+	if stored.ErrorCode != "stream_degraded_content_without_thinking" {
+		t.Fatalf("stored error_code = %q", stored.ErrorCode)
+	}
+
+	// The dedicated 599 sentinel is intentionally a failed/server-error record,
+	// while the UI distinguishes it from ordinary 5xx using error_code.
+	summary, err := repository.Summarize(ctx, repositorypkg.AuditSummaryQuery{Start: now.Add(-time.Hour), End: now.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Requests != 1 || summary.SuccessfulRequests != 0 || summary.FailedRequests != 1 {
+		t.Fatalf("summary = %#v", summary)
+	}
+	serverErrors, _, err := repository.ListCursor(ctx, repositorypkg.AuditCursorQuery{Limit: 10, Filter: repositorypkg.AuditListFilter{Status: "5xx"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(serverErrors) != 1 || serverErrors[0].RequestID != record.RequestID {
+		t.Fatalf("5xx filter = %#v", serverErrors)
+	}
+	successes, _, err := repository.ListCursor(ctx, repositorypkg.AuditCursorQuery{Limit: 10, Filter: repositorypkg.AuditListFilter{Status: "success"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(successes) != 0 {
+		t.Fatalf("quality-guard interrupt appeared as success: %#v", successes)
+	}
+}
+
 func uint64Pointer(value uint64) *uint64 { return &value }

@@ -140,6 +140,10 @@ export function ModelsPage() {
       setSelected(new Set());
       setPage(1);
       void queryClient.invalidateQueries({ queryKey: ["models"] });
+      if (result.accepted && result.synced === 0) {
+        toast.success(t("models.syncStarted"));
+        return;
+      }
       toast.success(t("models.synced", { count: result.synced }));
     },
     onError: showError,

@@ -629,10 +629,18 @@ function MediaUsage({ input, output }: { input: string; output: string }) {
   );
 }
 
+// isQualityGuardAudit 以 error_code 前缀识别质量守护打断。
+// 状态码不可作为判据：打断记为 599 以满足数据库约束，与真实 5xx 同段。
+// statusCode === -1 仅用于兼容早期写入过 -1 的记录。
+export function isQualityGuardAudit(audit: Pick<AuditDTO, "statusCode" | "errorCode">): boolean {
+  if (typeof audit.errorCode === "string" && audit.errorCode.startsWith("stream_degraded_")) return true;
+  return audit.statusCode === -1;
+}
+
 function StatusCode({ statusCode, hasError = false }: { statusCode: number; hasError?: boolean }) {
   const { t } = useTranslation();
   const tone = statusTone(statusCode, hasError);
-  const label = statusCode === -1 ? `-1 · ${t("audits.qualityGuardInterrupt")}` : String(statusCode || "-");
+  const label = statusCode === -1 ? t("audits.qualityGuardInterrupt") : String(statusCode || "-");
   return (
     <span className={cn("inline-flex items-center gap-1.5 text-xs tabular-nums", tone.text)}>
       <span className={cn("size-1.5 rounded-full", tone.dot)} />
@@ -645,16 +653,18 @@ function AuditStatus({ audit, onOpen }: { audit: AuditDTO; onOpen: () => void })
   const { t } = useTranslation();
   const mode = audit.operation === "compaction" ? t("audits.operations.compaction") : audit.streaming ? t("audits.stream") : t("audits.nonStream");
   const hasError = Boolean(audit.errorCode);
-  const isQualityGuard = audit.statusCode === -1 || (typeof audit.errorCode === "string" && audit.errorCode.startsWith("stream_degraded_"));
+  // 判定以 error_code 前缀为准：质量守护打断记为 599（受数据库 100..599 约束），
+  // 该状态码本身无法与真实 5xx 区分。-1 仅兼容历史数据。
+  const isQualityGuard = isQualityGuardAudit(audit);
   // 保留真实 HTTP 状态，同时明确标识 2xx 响应头之后发生的流式失败。
-  // statusCode 0 仅兼容曾运行过早期实现的开发数据库；-1 为质量守护打断。
+  // statusCode 0 仅兼容曾运行过早期实现的开发数据库。
   const showErrorLabel = !isQualityGuard && hasError && (audit.statusCode === 0 || (audit.statusCode >= 200 && audit.statusCode < 300));
   const content = (
     <>
       {isQualityGuard ? (
         <span className="inline-flex items-center gap-1.5 text-xs tabular-nums text-violet-700 dark:text-violet-300">
           <span className="size-1.5 rounded-full bg-violet-500" />
-          {`-1 · ${t("audits.qualityGuardInterrupt")}`}
+          {t("audits.qualityGuardInterrupt")}
         </span>
       ) : showErrorLabel ? (
         <span className="inline-flex items-center gap-1.5 text-xs tabular-nums text-amber-700 dark:text-amber-300">
@@ -664,6 +674,7 @@ function AuditStatus({ audit, onOpen }: { audit: AuditDTO; onOpen: () => void })
       ) : (
         <StatusCode statusCode={audit.statusCode} hasError={hasError} />
       )}
+      {/* 打断记录已在上方以紫色标签呈现，此处不再重复显示 599 数字。 */}
       <span className="block whitespace-nowrap text-[10px] text-muted-foreground">{mode}</span>
     </>
   );

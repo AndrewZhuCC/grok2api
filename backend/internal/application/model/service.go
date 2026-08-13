@@ -20,6 +20,7 @@ import (
 
 const defaultModelSyncWorkers = 25
 const syncFailurePersistTimeout = 5 * time.Second
+const backgroundModelSyncTimeout = 2 * time.Hour
 
 var maxModelBatchSize = repository.MaxPageSize * len(modeldomain.Capabilities())
 
@@ -53,6 +54,14 @@ type AccountOption struct {
 type RouteGroup struct {
 	Routes               []modeldomain.Route
 	EndpointCapabilities []string
+}
+
+// SyncStart describes a bulk model-catalog refresh that may outlive the HTTP request.
+type SyncStart struct {
+	Accepted  bool
+	Started   bool
+	AccountN  int
+	Synced    int
 }
 
 type ListFilter struct {
@@ -397,39 +406,57 @@ func (s *Service) BatchSetEnabled(ctx context.Context, ids []uint64, enabled boo
 }
 
 // Sync 从全部启用账号同步模型能力，并按 Provider 幂等更新公开路由表。
+// 调用方取消时后台继续跑完；同一次全量同步会合并，避免重复打上游。
 func (s *Service) Sync(ctx context.Context) (int, error) {
+	started, err := s.StartSync(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return started.Synced, nil
+}
+
+// StartSync begins a bulk catalog refresh. If the caller context is canceled
+// while the job is still running, the refresh keeps going in the background.
+func (s *Service) StartSync(ctx context.Context) (SyncStart, error) {
 	result := s.syncAll.DoChan("all", func() (any, error) {
-		return s.syncAllAccounts(ctx)
+		return s.syncAllAccounts(context.WithoutCancel(ctx))
 	})
 	select {
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		// Keep draining the singleflight channel so a canceled HTTP request
+		// cannot leak the result waiter while the catalog refresh continues.
+		go func() { <-result }()
+		return SyncStart{Accepted: true, Started: true}, nil
 	case value := <-result:
 		if value.Err != nil {
-			return 0, value.Err
+			return SyncStart{}, value.Err
 		}
-		return value.Val.(int), nil
+		started := value.Val.(SyncStart)
+		started.Accepted = true
+		return started, nil
 	}
 }
 
-func (s *Service) syncAllAccounts(ctx context.Context) (int, error) {
+func (s *Service) syncAllAccounts(parent context.Context) (SyncStart, error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), backgroundModelSyncTimeout)
+	defer cancel()
 	if s.providers == nil {
-		return 0, fmt.Errorf("Provider 注册表未初始化")
+		return SyncStart{}, fmt.Errorf("Provider 注册表未初始化")
 	}
 	providerValues := s.providers.Providers()
 	if len(providerValues) == 0 {
-		return 0, fmt.Errorf("没有已注册的 Provider")
+		return SyncStart{}, fmt.Errorf("没有已注册的 Provider")
 	}
 	credentials := make([]account.Credential, 0)
 	for _, providerValue := range providerValues {
 		values, err := s.accounts.ListEnabled(ctx, providerValue)
 		if err != nil {
-			return 0, err
+			return SyncStart{}, err
 		}
 		credentials = append(credentials, values...)
 	}
 	if len(credentials) == 0 {
-		return 0, fmt.Errorf("没有可用于模型同步的账号")
+		return SyncStart{}, fmt.Errorf("没有可用于模型同步的账号")
 	}
 	results, summary, runErr := batch.Map(ctx, credentials, batch.Options{Workers: s.bulkPool.Limit(), Pool: s.bulkPool}, func(workCtx context.Context, value account.Credential) ([]string, error) {
 		adapter, ok := s.providers.Models(value.Provider)
@@ -441,7 +468,7 @@ func (s *Service) syncAllAccounts(ctx context.Context) (int, error) {
 	pool := s.bulkPool.Snapshot()
 	s.logger.Info("model_bulk_sync_completed", "total", summary.Total, "submitted", summary.Submitted, "succeeded", summary.Succeeded, "failed", summary.Failed, "panicked", summary.Panicked, "duration_ms", summary.Duration.Milliseconds(), "canceled", summary.Canceled, "pool_limit", pool.Limit, "pool_active", pool.Active, "pool_queued", pool.Queued, "pool_peak", pool.Peak, "error", runErr)
 	if runErr != nil {
-		return 0, runErr
+		return SyncStart{}, runErr
 	}
 
 	uniqueModels := make(map[account.Provider]map[string]struct{}, len(providerValues))
@@ -471,9 +498,9 @@ func (s *Service) syncAllAccounts(ctx context.Context) (int, error) {
 	}
 	if succeeded == 0 {
 		if lastErr != nil {
-			return 0, lastErr
+			return SyncStart{}, lastErr
 		}
-		return 0, fmt.Errorf("没有账号成功同步模型")
+		return SyncStart{}, fmt.Errorf("没有账号成功同步模型")
 	}
 	syncedModels := 0
 	for _, providerValue := range providerValues {
@@ -486,11 +513,11 @@ func (s *Service) syncAllAccounts(ctx context.Context) (int, error) {
 			models = append(models, value)
 		}
 		if err := s.models.UpsertDiscovered(ctx, providerValue, models); err != nil {
-			return 0, err
+			return SyncStart{}, err
 		}
 		syncedModels += len(models)
 	}
-	return syncedModels, nil
+	return SyncStart{Started: true, AccountN: len(credentials), Synced: syncedModels}, nil
 }
 
 // HasSuccessfulAccountSync 判断账号是否已有成功模型能力快照，不触发上游请求。
