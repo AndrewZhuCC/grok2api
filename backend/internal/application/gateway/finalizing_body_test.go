@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 )
 
 // newOnceFinalizer mirrors production: the audit write is guarded by sync.Once,
@@ -88,7 +90,7 @@ func TestSuppressCloseFinalizeIgnoresOtherReadClosers(t *testing.T) {
 	}
 }
 
-// isQualityGuardInterrupt drives the -1 audit status. stream_closed must not
+// isQualityGuardInterrupt drives the 599 audit status. stream_closed must not
 // qualify, or the overwrite bug would silently look correct again.
 func TestQualityGuardInterruptClassification(t *testing.T) {
 	interrupts := []string{
@@ -104,5 +106,36 @@ func TestQualityGuardInterruptClassification(t *testing.T) {
 		if isQualityGuardInterrupt(code) {
 			t.Fatalf("%q must not be a quality-guard interrupt", code)
 		}
+	}
+}
+
+func TestAuditStatusForStreamFinalizeKeeps429WhenMixedWithInterrupt(t *testing.T) {
+	rateLimited := 429
+	attempts := []audit.Attempt{{
+		Source:             audit.AttemptSourceUpstreamHTTP,
+		Stage:              "upstream_response",
+		UpstreamStatusCode: &rateLimited,
+	}}
+	got := auditStatusForStreamFinalize(200, "stream_degraded_content_without_thinking", attempts)
+	if got != 429 {
+		t.Fatalf("mixed 429+interrupt status = %d, want 429", got)
+	}
+}
+
+func TestAuditStatusForStreamFinalizeMarksPureInterrupt(t *testing.T) {
+	got := auditStatusForStreamFinalize(200, "stream_degraded_content_without_thinking", nil)
+	if got != audit.StatusQualityGuardInterrupt {
+		t.Fatalf("pure interrupt status = %d, want %d", got, audit.StatusQualityGuardInterrupt)
+	}
+}
+
+func TestAuditStatusForStreamFinalizePreservesUpstreamWhenNotInterrupt(t *testing.T) {
+	rateLimited := 429
+	attempts := []audit.Attempt{{UpstreamStatusCode: &rateLimited}}
+	if got := auditStatusForStreamFinalize(200, "", attempts); got != 200 {
+		t.Fatalf("success status = %d, want 200", got)
+	}
+	if got := auditStatusForStreamFinalize(200, "stream_closed", attempts); got != 200 {
+		t.Fatalf("stream_closed status = %d, want 200", got)
 	}
 }

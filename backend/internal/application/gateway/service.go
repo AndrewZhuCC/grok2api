@@ -1297,10 +1297,13 @@ attemptLoop:
 				record.AccountName = credential.Name
 				// Quality-guard interrupts keep a dedicated audit status so the
 				// request list can show them without looking like a normal 200.
-				// HTTP transport status stays 2xx; business outcome is -1.
-				record.StatusCode = response.StatusCode
+				// HTTP transport status stays 2xx; business outcome is 599.
+				// A mixed 429-then-interrupt chain must keep 429 at request
+				// level; the interrupt is recorded as its own attempt.
+				priorAttempts := failureAttempts.snapshot()
+				record.StatusCode = auditStatusForStreamFinalize(response.StatusCode, errorCode, priorAttempts)
 				if isQualityGuardInterrupt(errorCode) {
-					record.StatusCode = audit.StatusQualityGuardInterrupt
+					failureAttempts.captureQualityGuardInterrupt(credential, responseStartedAt, response, errorCode)
 				}
 				record.InputTokens = usage.InputTokens
 				record.CachedInputTokens = usage.CachedInputTokens
@@ -1458,6 +1461,29 @@ func isQualityGuardInterrupt(errorCode string) bool {
 	default:
 		return strings.HasPrefix(errorCode, "stream_degraded_")
 	}
+}
+
+// auditStatusForStreamFinalize decides the request-level audit status for a
+// 2xx upstream stream. A quality-guard interrupt is 599 only when it is the
+// sole outcome; if earlier attempts already hit 429, the list must keep
+// showing 429 so the interrupt does not overwrite the rate-limit.
+func auditStatusForStreamFinalize(upstreamStatus int, errorCode string, attempts []audit.Attempt) int {
+	if !isQualityGuardInterrupt(errorCode) {
+		return upstreamStatus
+	}
+	if hasUpstreamRateLimitedAttempt(attempts) {
+		return http.StatusTooManyRequests
+	}
+	return audit.StatusQualityGuardInterrupt
+}
+
+func hasUpstreamRateLimitedAttempt(attempts []audit.Attempt) bool {
+	for _, attempt := range attempts {
+		if attempt.UpstreamStatusCode != nil && *attempt.UpstreamStatusCode == http.StatusTooManyRequests {
+			return true
+		}
+	}
+	return false
 }
 
 // auditRequestSucceeded keeps transport truth (the HTTP status) separate from

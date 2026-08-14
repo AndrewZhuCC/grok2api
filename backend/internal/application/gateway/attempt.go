@@ -147,6 +147,29 @@ func (r *failureAttemptRecorder) captureResponse(credential accountdomain.Creden
 	return nil
 }
 
+func (r *failureAttemptRecorder) captureQualityGuardInterrupt(credential accountdomain.Credential, startedAt time.Time, response *provider.Response, errorCode string) {
+	statusCode := audit.StatusQualityGuardInterrupt
+	attempt := audit.Attempt{
+		Source:             audit.AttemptSourceUpstreamHTTP,
+		Stage:              "quality_guard",
+		AccountID:          auditAccountID(credential.ID),
+		AccountName:        credential.Name,
+		Method:             r.method,
+		RequestPath:        r.path,
+		StartedAt:          startedAt.UTC(),
+		DurationMS:         time.Since(startedAt).Milliseconds(),
+		UpstreamStatusCode: &statusCode,
+		UpstreamStatus:     "599 Quality Guard Interrupt",
+		TransportError:     sanitizeDiagnosticText(errorCode, diagnosticTextLimit),
+		ErrorChain:         []audit.ErrorFrame{{Type: "quality_guard", Message: sanitizeDiagnosticText(errorCode, 512)}},
+	}
+	if response != nil {
+		attempt.UpstreamURL = sanitizeUpstreamURL(response.UpstreamURL)
+		attempt.ResponseHeaders = sanitizeDiagnosticHeaders(response.Header)
+	}
+	r.append(attempt)
+}
+
 func (r *failureAttemptRecorder) captureStreamFailure(credential accountdomain.Credential, startedAt time.Time, response *provider.Response, diagnostic StreamFailureDiagnostic) {
 	if response == nil {
 		return

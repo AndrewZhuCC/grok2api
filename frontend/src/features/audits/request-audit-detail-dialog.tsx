@@ -23,11 +23,10 @@ const PRE_UPSTREAM_ERROR_CODES = new Set([
   "upstream_unavailable",
 ]);
 
-// 质量守护打断以 error_code 前缀识别。打断记为 599（数据库约束 100..599），
-// 状态码与真实 5xx 无法区分，故不能作为判据；-1 仅兼容历史记录。
-function isQualityGuardError(errorCode?: string, statusCode?: number): boolean {
-  if (typeof errorCode === "string" && errorCode.startsWith("stream_degraded_")) return true;
-  return statusCode === -1;
+// 质量守护打断只认请求级 599（或历史 -1）。errorCode 前缀不能单独当判据，
+// 否则混有 429 的请求会被整行画成打断。
+function isQualityGuardError(_errorCode?: string, statusCode?: number): boolean {
+  return statusCode === 599 || statusCode === -1;
 }
 
 export function RequestAuditDetailDialog({ audit, open, onOpenChange }: { audit: AuditDTO | null; open: boolean; onOpenChange: (open: boolean) => void }) {
@@ -104,7 +103,7 @@ function AttemptButton({ attempt, selected, onClick }: { attempt: AuditAttemptDT
     >
       <span className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-2"><Icon className="size-3.5 shrink-0" />{t("audits.attemptNumber", { number: attempt.number })}</span>
-        {attempt.upstreamStatusCode ? <StatusBadge statusCode={attempt.upstreamStatusCode} failed={attempt.stage === "response_stream"} /> : null}
+        {attempt.upstreamStatusCode ? <StatusBadge statusCode={attempt.upstreamStatusCode} failed={attempt.stage === "response_stream" || attempt.stage === "quality_guard"} qualityGuard={attempt.stage === "quality_guard"} /> : null}
       </span>
     </button>
   );
@@ -276,8 +275,10 @@ function formattedResponseBody(attempt: AuditAttemptDTO): string {
   }
 }
 
-function StatusBadge({ statusCode, failed = false }: { statusCode: number; failed?: boolean }) {
-  const className = failed
+function StatusBadge({ statusCode, failed = false, qualityGuard = false }: { statusCode: number; failed?: boolean; qualityGuard?: boolean }) {
+  const className = qualityGuard
+    ? "bg-violet-500/10 text-violet-700 dark:text-violet-300"
+    : failed
     ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
     : statusCode >= 500
     ? "bg-red-500/10 text-red-700 dark:text-red-300"

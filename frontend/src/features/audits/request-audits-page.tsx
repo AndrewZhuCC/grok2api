@@ -629,12 +629,11 @@ function MediaUsage({ input, output }: { input: string; output: string }) {
   );
 }
 
-// isQualityGuardAudit 以 error_code 前缀识别质量守护打断。
-// 状态码不可作为判据：打断记为 599 以满足数据库约束，与真实 5xx 同段。
-// statusCode === -1 仅用于兼容早期写入过 -1 的记录。
+// isQualityGuardAudit 只把真正的打断画成质量守护。
+// 请求级 599（或历史 -1）才是打断；errorCode 前缀不能单独当判据，
+// 否则同一次请求里先 429 再打断会被整行染成打断。
 export function isQualityGuardAudit(audit: Pick<AuditDTO, "statusCode" | "errorCode">): boolean {
-  if (typeof audit.errorCode === "string" && audit.errorCode.startsWith("stream_degraded_")) return true;
-  return audit.statusCode === -1;
+  return audit.statusCode === 599 || audit.statusCode === -1;
 }
 
 function StatusCode({ statusCode, hasError = false }: { statusCode: number; hasError?: boolean }) {
@@ -653,8 +652,7 @@ function AuditStatus({ audit, onOpen }: { audit: AuditDTO; onOpen: () => void })
   const { t } = useTranslation();
   const mode = audit.operation === "compaction" ? t("audits.operations.compaction") : audit.streaming ? t("audits.stream") : t("audits.nonStream");
   const hasError = Boolean(audit.errorCode);
-  // 判定以 error_code 前缀为准：质量守护打断记为 599（受数据库 100..599 约束），
-  // 该状态码本身无法与真实 5xx 区分。-1 仅兼容历史数据。
+  // 请求级 599 / 历史 -1 才画成打断。混有 429 的记录保持 429，打断只在 attempts。
   const isQualityGuard = isQualityGuardAudit(audit);
   // 保留真实 HTTP 状态，同时明确标识 2xx 响应头之后发生的流式失败。
   // statusCode 0 仅兼容曾运行过早期实现的开发数据库。
