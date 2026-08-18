@@ -42,6 +42,7 @@ var reasoningEffortSuffixes = []string{
 //
 // Unknown models default to none-only and never expand into effort aliases.
 var grokReasoningCapabilities = map[string][]string{
+	"grok-4.6":                     {ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh},
 	"grok-4.5":                     {ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh},
 	"grok-4.3":                     {ReasoningEffortNone, ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh},
 	"grok-build-0.1":               {ReasoningEffortNone},
