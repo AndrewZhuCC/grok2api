@@ -40,6 +40,7 @@ type QualityProbeInput struct {
 	Model           string
 	Prompt          string
 	Expected        string
+	MatchMode       string
 	MaxOutputTokens int
 }
 
@@ -127,13 +128,15 @@ func (s *Service) ProbeQuality(ctx context.Context, nodeID uint64, input Quality
 	input.Model = strings.TrimSpace(input.Model)
 	input.Prompt = strings.TrimSpace(input.Prompt)
 	input.Expected = strings.TrimSpace(input.Expected)
+	rawMatchMode := strings.TrimSpace(input.MatchMode)
+	input.MatchMode = NormalizeMatchMode(input.MatchMode)
 	if input.Model == "" {
 		return QualityProbeResult{}, fmt.Errorf("%w: model 必填", ErrInvalidInput)
 	}
 	if input.Prompt == "" {
 		input.Prompt = DefaultQualityProbePrompt
 	}
-	if input.Expected == "" {
+	if input.Expected == "" && rawMatchMode == "" {
 		input.Expected = DefaultQualityProbeExpected
 	}
 	if len(input.Prompt) > MaxQualityProbePromptBytes || len(input.Expected) > MaxQualityProbeExpectedBytes {

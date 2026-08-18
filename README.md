@@ -447,3 +447,8 @@ make swagger
 - [简体中文 README](./README.zh-CN.md)
 - [Backend guide](./backend/README.md)
 - [Frontend guide](./frontend/README.md)
+- [AI agent operations guide](./AGENTS.md)
+- [Quality Guard reference](./docs/QUALITY_GUARD.md)
+- [Egress topology and safety boundaries](./docs/EGRESS.md)
+- [Recommended residential/Resin and Mihomo deployment](./docs/RECOMMENDED_DEPLOYMENT.md)
+- [Local deployment differences](./docs/LOCAL_PATCHES.md)

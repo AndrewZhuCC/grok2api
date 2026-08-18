@@ -18,6 +18,9 @@ import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DegradeAccountsPanel } from "@/features/quality-guard/degrade-accounts-panel";
+import { ProbeProfilesPanel } from "@/features/quality-guard/probe-profiles-panel";
 import { getQualityGuardStatus, runQualityTest, updateQualityGuardPolicy, type QualityGuardEvent, type QualityGuardNodeState, type QualityGuardPolicy, type QualityGuardStatistics, type QualityGuardStatus, type QualityTestResult } from "@/features/quality-guard/quality-guard-api";
 import { getResinQualityStatus, postResinQualityReshuffle, updateResinQualityConfig, type ResinQualityStatus } from "@/features/resin-quality-guard/resin-quality-guard-api";
 import { createEgressNode, deleteEgressNodes, listAllEgressNodes, updateEgressNode, updateEgressNodesEnabled, type EgressNodeDTO, type EgressNodeInput } from "@/features/settings/settings-api";
@@ -205,6 +208,19 @@ export function QualityGuardPage() {
         onToggleWatch={(enabled) => resinConfigMutation.mutate({ streamWatchEnabled: enabled })}
       />
 
+      <Tabs defaultValue="nodes">
+        <TabsList>
+          <TabsTrigger value="nodes">{t("qualityGuard.nodesTab")}</TabsTrigger>
+          <TabsTrigger value="profiles">{t("qualityGuard.profilesTab")}</TabsTrigger>
+          <TabsTrigger value="accounts">{t("qualityGuard.degrade.tab")}</TabsTrigger>
+        </TabsList>
+        <TabsContent value="profiles" className="mt-6">
+          <ProbeProfilesPanel />
+        </TabsContent>
+        <TabsContent value="accounts" className="mt-6">
+          <DegradeAccountsPanel softTPS={status?.config?.soft_tps} hardTPS={status?.config?.hard_tps} />
+        </TabsContent>
+        <TabsContent value="nodes" className="mt-6 space-y-6">
       {!status?.available ? <UnavailableState /> : (
         <>
           <section className="grid overflow-hidden rounded-lg bg-card sm:grid-cols-2 xl:grid-cols-4" aria-label={t("qualityGuard.overview")}>
@@ -270,6 +286,8 @@ export function QualityGuardPage() {
           </AlertDialog>
         </>
       )}
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
@@ -577,6 +595,7 @@ function Policy({ status, onEdit }: { status: QualityGuardStatus; onEdit: () => 
     [t("qualityGuard.passiveInterval"), formatDuration(config.passive_poll_seconds)],
     [t("qualityGuard.quarantineDuration"), formatDuration(config.quarantine_seconds)],
     [t("qualityGuard.minimumNodes"), String(config.min_healthy_nodes)],
+    [t("qualityGuard.profilesTab"), status.profiles?.find((profile) => profile.id === status.activeProfileId)?.name ?? status.activeProfileId ?? "-"],
   ];
   return <section className="rounded-lg bg-card p-4 sm:p-5" aria-labelledby="guard-policy-title">
     <div className="flex items-center justify-between gap-3">
@@ -608,7 +627,8 @@ const DEFAULT_POLICY: QualityGuardPolicy = {
 function PolicyEditor({ open, onOpenChange, status }: { open: boolean; onOpenChange: (open: boolean) => void; status: QualityGuardStatus }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const nodeCount = status.config?.node_ids.length ?? 1;
+  const nodeCount = status.config?.node_ids.length;
+  const nodeLimit = nodeCount && nodeCount > 0 ? nodeCount : undefined;
   const form = useForm<QualityGuardPolicy>({ resolver: zodResolver(policySchema), defaultValues: policyFromStatus(status) });
   const mode = useWatch({ control: form.control, name: "mode" });
   const softTPS = useWatch({ control: form.control, name: "softTPS" });
@@ -626,7 +646,10 @@ function PolicyEditor({ open, onOpenChange, status }: { open: boolean; onOpenCha
   });
 
   const setMode = (value: QualityGuardPolicy["mode"]) => form.setValue("mode", value, { shouldDirty: true, shouldValidate: true });
-  const resetDefaults = () => form.reset({ ...DEFAULT_POLICY, minHealthyNodes: Math.min(DEFAULT_POLICY.minHealthyNodes, nodeCount) });
+  const resetDefaults = () => form.reset({
+    ...DEFAULT_POLICY,
+    minHealthyNodes: nodeLimit ? Math.min(DEFAULT_POLICY.minHealthyNodes, nodeLimit) : DEFAULT_POLICY.minHealthyNodes,
+  });
 
   return <Dialog open={open} onOpenChange={onOpenChange}>
     <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
@@ -646,7 +669,7 @@ function PolicyEditor({ open, onOpenChange, status }: { open: boolean; onOpenCha
           <PolicyField id="guard-soft-strikes" label={t("qualityGuard.consecutiveSoft")} error={form.formState.errors.consecutiveSoft?.message}><Input id="guard-soft-strikes" type="number" min={1} max={20} {...form.register("consecutiveSoft", { valueAsNumber: true })} /></PolicyField>
           <PolicyField id="guard-error-strikes" label={t("qualityGuard.consecutiveErrors")} error={form.formState.errors.consecutiveErrors?.message}><Input id="guard-error-strikes" type="number" min={1} max={20} {...form.register("consecutiveErrors", { valueAsNumber: true })} /></PolicyField>
           <PolicyField id="guard-quarantine-seconds" label={t("qualityGuard.quarantineSeconds")} error={form.formState.errors.quarantineSeconds?.message}><Input id="guard-quarantine-seconds" type="number" min={30} max={86400} step={30} {...form.register("quarantineSeconds", { valueAsNumber: true })} /></PolicyField>
-          <PolicyField id="guard-minimum-nodes" label={t("qualityGuard.minimumNodes")} error={form.formState.errors.minHealthyNodes?.message}><Input id="guard-minimum-nodes" type="number" min={1} max={nodeCount} {...form.register("minHealthyNodes", { valueAsNumber: true, max: nodeCount })} /></PolicyField>
+          <PolicyField id="guard-minimum-nodes" label={t("qualityGuard.minimumNodes")} error={form.formState.errors.minHealthyNodes?.message}><Input id="guard-minimum-nodes" type="number" min={1} max={nodeLimit} {...form.register("minHealthyNodes", { valueAsNumber: true, max: nodeLimit })} /></PolicyField>
         </div>
         {thresholdsInvalid ? <p className="text-xs text-destructive">{t("qualityGuard.softThresholdMustBeLower")}</p> : null}
         <DialogFooter className="gap-2 sm:justify-between">
@@ -698,10 +721,9 @@ function qualityTestState(result: QualityTestResult, status: QualityGuardStatus)
   const hardTPS = status.config?.hard_tps ?? 1000;
   let classification = "healthy";
   let reason = "within_threshold";
-  if (!result.expectedMatched) { classification = "soft"; reason = "expected_marker_missing"; }
-  else if (result.outputTokens < 32) { classification = "soft"; reason = "insufficient_output_tokens"; }
-  else if (result.outputTokensPerSecond >= hardTPS) { classification = "hard"; reason = "hard_tps"; }
-  else if (result.outputTokensPerSecond >= softTPS) { classification = "soft"; reason = "soft_tps"; }
+  if (!result.expectedMatched) { classification = "hard"; reason = "expected_marker_missing"; }
+  else if (result.outputTokens >= 32 && result.outputTokensPerSecond >= hardTPS) { classification = "hard"; reason = "hard_tps"; }
+  else if (result.outputTokens >= 32 && result.outputTokensPerSecond >= softTPS) { classification = "soft"; reason = "soft_tps"; }
   const now = Date.now() / 1000;
   return {
     active_soft_strikes: classification === "soft" ? 1 : classification === "hard" ? (status.config?.consecutive_soft ?? 2) : 0,

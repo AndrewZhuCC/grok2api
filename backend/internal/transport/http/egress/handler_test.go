@@ -94,6 +94,37 @@ func TestWriteQualityProbeErrorIdentifiesMissingProbeAccount(t *testing.T) {
 	}
 }
 
+func TestQualityGuardProfilesCRUDAndStatusOmitsPrompt(t *testing.T) {
+	directory := t.TempDir()
+	statePath := directory + "/state.json"
+	configPath := directory + "/runtime-config.json"
+	if err := os.WriteFile(statePath, []byte(`{"version":1,"guard":{"mode":"hybrid","model":"grok-4.5","node_ids":["8"]},"nodes":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(nil, statePath, configPath)
+
+	createRecorder := httptest.NewRecorder()
+	createContext, _ := gin.CreateTestContext(createRecorder)
+	createContext.Request = httptest.NewRequest("POST", "/egress-quality-guard/profiles", bytes.NewBufferString(`{"name":"自定义标记","prompt":"只输出 FLAG_OK","expectedText":"FLAG_OK","matchMode":"last_line","active":true}`))
+	createContext.Request.Header.Set("Content-Type", "application/json")
+	handler.createQualityGuardProfile(createContext)
+	if createRecorder.Code != 200 || !strings.Contains(createRecorder.Body.String(), `"FLAG_OK"`) {
+		t.Fatalf("create status=%d body=%s", createRecorder.Code, createRecorder.Body.String())
+	}
+
+	statusRecorder := httptest.NewRecorder()
+	statusContext, _ := gin.CreateTestContext(statusRecorder)
+	statusContext.Request = httptest.NewRequest("GET", "/egress-quality-guard", nil)
+	handler.qualityGuardStatus(statusContext)
+	body := statusRecorder.Body.String()
+	if statusRecorder.Code != 200 || !strings.Contains(body, `"activeProfileId":"p-2"`) || !strings.Contains(body, `"has_expected":true`) {
+		t.Fatalf("status=%d body=%s", statusRecorder.Code, body)
+	}
+	if strings.Contains(body, "只输出 FLAG_OK") || strings.Contains(body, "FLAG_OK") {
+		t.Fatalf("status leaked probe prompt or marker: %s", body)
+	}
+}
+
 func TestUpdateQualityGuardConfigWritesPrivateAtomicFile(t *testing.T) {
 	directory := t.TempDir()
 	statePath := directory + "/state.json"
@@ -125,6 +156,37 @@ func TestUpdateQualityGuardConfigWritesPrivateAtomicFile(t *testing.T) {
 	// is ignored and files always report 0666-style permissions.
 	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("runtime config mode = %o", info.Mode().Perm())
+	}
+}
+
+func TestUpdateQualityGuardConfigAllowsDynamicNodeInventory(t *testing.T) {
+	directory := t.TempDir()
+	statePath := directory + "/state.json"
+	configPath := directory + "/runtime-config.json"
+	state := `{"version":1,"guard":{"mode":"hybrid","node_ids":[]},"nodes":{}}`
+	if err := os.WriteFile(statePath, []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest("PUT", "/egress-quality-guard/config", bytes.NewBufferString(`{"mode":"hybrid","activeIntervalSeconds":1800,"passivePollSeconds":5,"softTPS":500,"hardTPS":1000,"consecutiveSoft":2,"consecutiveErrors":2,"quarantineSeconds":300,"minHealthyNodes":3}`))
+	context.Request.Header.Set("Content-Type", "application/json")
+
+	NewHandler(nil, statePath, configPath).updateQualityGuardConfig(context)
+
+	if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"saved":true`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQualityGuardConfigValidationRejectsKnownNodeLimit(t *testing.T) {
+	request := qualityGuardConfigRequest{
+		Mode: "hybrid", ActiveIntervalSeconds: 1800, PassivePollSeconds: 5,
+		SoftTPS: 500, HardTPS: 1000, ConsecutiveSoft: 2, ConsecutiveErrors: 2,
+		QuarantineSeconds: 300, MinHealthyNodes: 3,
+	}
+	if err := request.validate(2); err == nil {
+		t.Fatal("expected known node inventory to enforce its upper bound")
 	}
 }
 

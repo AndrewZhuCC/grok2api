@@ -59,6 +59,10 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/egress-nodes/:id/quality-test", h.testQuality)
 	router.GET("/egress-quality-guard", h.qualityGuardStatus)
 	router.PUT("/egress-quality-guard/config", h.updateQualityGuardConfig)
+	router.GET("/egress-quality-guard/profiles", h.listQualityGuardProfiles)
+	router.POST("/egress-quality-guard/profiles", h.createQualityGuardProfile)
+	router.PUT("/egress-quality-guard/profiles/:id", h.updateQualityGuardProfile)
+	router.DELETE("/egress-quality-guard/profiles/:id", h.deleteQualityGuardProfile)
 	router.POST("/egress-quality-guard/nodes/:id/test", h.testQualityGuardNode)
 	router.POST("/egress-nodes/:id/accounts", h.assignAccounts)
 	router.DELETE("/egress-nodes/accounts", h.unassignAccounts)
@@ -200,6 +204,10 @@ func (h *Handler) qualityGuardStatus(c *gin.Context) {
 	if state.Statistics.StartedAt > 0 {
 		payload["statistics"] = state.Statistics
 	}
+	if profiles, err := loadProbeProfileFile(h.profilesPath()); err == nil {
+		payload["activeProfileId"] = profiles.ActiveProfileID
+		payload["profiles"] = profiles.summaries()
+	}
 	response.Success(c, http.StatusOK, payload)
 }
 
@@ -285,7 +293,7 @@ func (r qualityGuardConfigRequest) validate(nodeCount int) error {
 	if r.QuarantineSeconds < 30 || r.QuarantineSeconds > 86400 {
 		return errors.New("隔离时长必须在 30 到 86400 秒之间")
 	}
-	if r.MinHealthyNodes < 1 || r.MinHealthyNodes > nodeCount {
+	if r.MinHealthyNodes < 1 || (nodeCount > 0 && r.MinHealthyNodes > nodeCount) {
 		return errors.New("最少保留节点必须在受管节点数量范围内")
 	}
 	return nil
@@ -358,11 +366,24 @@ func (h *Handler) testQualityGuardNode(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if h.guardProbe.ClientKeyID == 0 || strings.TrimSpace(h.guardProbe.Model) == "" || h.guardProbe.Prompt == "" || h.guardProbe.Expected == "" {
+	if h.guardProbe.ClientKeyID == 0 || strings.TrimSpace(h.guardProbe.Model) == "" {
 		response.Error(c, http.StatusServiceUnavailable, "qualityGuardUnavailable", "质量守护配置暂不可用")
 		return
 	}
-	value, err := h.service.ProbeQuality(c.Request.Context(), nodeID, h.guardProbe)
+	var request struct {
+		ProfileID string `json:"profileId"`
+	}
+	_ = c.ShouldBindJSON(&request)
+	input, err := h.resolveProbeInput(strings.TrimSpace(request.ProfileID))
+	if err != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", err.Error())
+		return
+	}
+	if strings.TrimSpace(input.Prompt) == "" {
+		response.Error(c, http.StatusServiceUnavailable, "qualityGuardUnavailable", "质量守护配置暂不可用")
+		return
+	}
+	value, err := h.service.ProbeQuality(c.Request.Context(), nodeID, input)
 	if err != nil {
 		h.writeQualityProbeError(c, err)
 		return
@@ -479,6 +500,7 @@ type qualityProbeRequest struct {
 	Model           string `json:"model" binding:"required"`
 	Prompt          string `json:"prompt"`
 	Expected        string `json:"expected"`
+	MatchMode       string `json:"matchMode"`
 	MaxOutputTokens int    `json:"maxOutputTokens"`
 }
 
@@ -499,7 +521,7 @@ func (h *Handler) testQuality(c *gin.Context) {
 	}
 	value, err := h.service.ProbeQuality(c.Request.Context(), nodeID, egressapp.QualityProbeInput{
 		ClientKeyID: clientKeyID, Model: request.Model, Prompt: request.Prompt,
-		Expected: request.Expected, MaxOutputTokens: request.MaxOutputTokens,
+		Expected: request.Expected, MatchMode: request.MatchMode, MaxOutputTokens: request.MaxOutputTokens,
 	})
 	if err != nil {
 		h.writeQualityProbeError(c, err)
