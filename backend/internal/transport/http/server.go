@@ -192,9 +192,9 @@ func New(deps Dependencies) *gin.Engine {
 	if deps.Settings != nil {
 		inferenceHandler.SetPublicAPIBaseURLResolver(deps.Settings.PublicAPIBaseURL)
 	}
-	if deps.ResinQualityGuard != nil {
-		inferenceHandler.SetResinQualityGuard(deps.ResinQualityGuard)
-	}
+	// Request-path missing-thinking hold/retry is handled by gateway qualityRetry.
+	// Keep the Resin guard available for its admin/status APIs, but do not inject
+	// the legacy stream-watch interceptor into inference requests.
 	inferenceHandler.Register(v1)
 	registerFrontend(router, deps.FrontendStaticPath)
 	return router

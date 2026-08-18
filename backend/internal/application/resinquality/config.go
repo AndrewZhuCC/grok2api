@@ -78,7 +78,7 @@ func LoadConfigFromEnv() Config {
 		FailClosed:        envBool("RESIN_QUALITY_GUARD_FAIL_CLOSED", false),
 		// Default on: live grok-4.5 degraded exits often show reasoningTokens=0.
 		ZeroReasoningSoft:  envBool("RESIN_QUALITY_GUARD_ZERO_REASONING_SOFT", true),
-		StreamWatchEnabled: envBool("RESIN_QUALITY_GUARD_STREAM_WATCH", true),
+		StreamWatchEnabled: envBool("RESIN_QUALITY_GUARD_STREAM_WATCH", false),
 		StreamWatchTimeout: time.Duration(envInt("RESIN_QUALITY_GUARD_STREAM_WATCH_TIMEOUT_SECONDS", 45)) * time.Second,
 		StreamMaxAttempts:  envInt("RESIN_QUALITY_GUARD_STREAM_MAX_ATTEMPTS", 3),
 		RequestTimeout:     time.Duration(envInt("RESIN_QUALITY_GUARD_REQUEST_TIMEOUT_SECONDS", 60)) * time.Second,

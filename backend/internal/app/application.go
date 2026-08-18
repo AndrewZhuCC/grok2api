@@ -352,6 +352,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	modelRepo.SetInvalidationObserver(invalidationService.Notify)
 	clientKeyRepo.SetInvalidationObserver(invalidationService.Notify)
 	gatewayService := gateway.NewService(modelService, auditService, accountService, clientKeyService, providers, selector, responseRepo, cfg.Routing.MaxAttempts)
+	gatewayService.UpdateQualityRetry(qualityRetryRuntime(cfg.QualityGuard.RequestRetry))
 	gatewayService.UpdateMarkBuildChatDeniedAsReauth(cfg.Routing.MarkBuildChatDeniedAsReauth)
 	gatewayService.SetLogger(logger)
 	egressService.SetQualityProber(gatewayService)
@@ -405,6 +406,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		egressManager.UpdateAccountIsolatedConnections(next.Routing.AccountIsolatedConnections)
 		reasoningReplay.UpdateConfig(reasoningreplay.Config{Enabled: next.Routing.ReasoningReplayEnabled, TTL: next.Routing.ReasoningReplayTTL.Value()})
 		gatewayService.UpdateMaxAttempts(next.Routing.MaxAttempts)
+		gatewayService.UpdateQualityRetry(qualityRetryRuntime(next.QualityGuard.RequestRetry))
 		gatewayService.UpdateMarkBuildChatDeniedAsReauth(next.Routing.MarkBuildChatDeniedAsReauth)
 		gatewayService.UpdateBuildForbiddenReauthPolicy(next.Accounts.MarkBuildForbiddenReauth, next.Accounts.BuildForbiddenReauthCodes)
 		auditService.UpdateWriterConfig(next.Audit.BatchSize, next.Audit.FlushInterval.Value(), next.Audit.CommitDelay.Value())
@@ -499,6 +501,16 @@ func accountAutoCleanConfig(value config.AccountsConfig) accountapp.AutoCleanCon
 		Interval:        value.AutoCleanReauthInterval.Value(),
 		MinAge:          value.AutoCleanReauthMinAge.Value(),
 		IncludeDisabled: value.AutoCleanIncludeDisabled,
+	}
+}
+
+func qualityRetryRuntime(value config.QualityGuardRequestRetryConfig) gateway.QualityRetryRuntime {
+	return gateway.QualityRetryRuntime{
+		Enabled:         value.Enabled,
+		MaxAttempts:     value.MaxAttempts,
+		HoldTimeout:     value.HoldTimeout.Value(),
+		MinOutputTokens: int64(value.MinOutputTokens),
+		OnExhausted:     value.OnExhausted,
 	}
 }
 
